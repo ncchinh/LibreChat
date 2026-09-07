@@ -2147,38 +2147,25 @@ export function createConversationMethods(
         delete update.messages;
       }
       const unsetFields: Record<string, number> = { ...(metadata?.unsetFields ?? {}) };
-      delete unsetFields.initial_agent_id;
-
-      if (Object.prototype.hasOwnProperty.call(update, 'chatProjectId') && update.chatProjectId) {
-        const chatProjectId = typeof update.chatProjectId === 'string' ? update.chatProjectId : '';
-        let isValidChatProject = isValidObjectIdString(chatProjectId);
-
-        if (isValidChatProject) {
+      let chatProjectIdOnInsert: string | undefined;
+      // Turn saves may seed a new conversation, never move or detach an existing one.
+      const candidate = update.chatProjectId;
+      delete update.chatProjectId;
+      delete unsetFields.chatProjectId;
+      if (metadata?.noUpsert !== true && typeof candidate === 'string') {
+        if (isValidObjectIdString(candidate)) {
           const ChatProject = mongoose.models.ChatProject as Model<IChatProjectDocument>;
           const project = await ChatProject.exists({
-            _id: new mongoose.Types.ObjectId(chatProjectId),
+            _id: new mongoose.Types.ObjectId(candidate),
             user: userId,
           });
-          isValidChatProject = project != null;
-        }
-
-        if (!isValidChatProject) {
-          delete update.chatProjectId;
-          unsetFields.chatProjectId = 1;
+          if (project != null) {
+            chatProjectIdOnInsert = candidate;
+          }
         }
       }
 
-      const mayChangeProjectMembership =
-        Object.prototype.hasOwnProperty.call(update, 'chatProjectId') ||
-        Object.prototype.hasOwnProperty.call(unsetFields, 'chatProjectId');
-      let previousChatProjectId: string | null = null;
-      if (mayChangeProjectMembership) {
-        const existing = await Conversation.findOne(
-          { conversationId, user: userId },
-          'chatProjectId',
-        ).lean<{ chatProjectId?: string | null } | null>();
-        previousChatProjectId = existing?.chatProjectId ?? null;
-      }
+      delete unsetFields.initial_agent_id;
 
       if (newConversationId) {
         update.conversationId = newConversationId;
@@ -2256,6 +2243,7 @@ export function createConversationMethods(
           : createdAtOnInsert;
         operation.$setOnInsert = {
           initial_agent_id: initialAgentId,
+          ...(chatProjectIdOnInsert ? { chatProjectId: chatProjectIdOnInsert } : {}),
           ...(createdAtForInsert ? { createdAt: createdAtForInsert } : {}),
         };
         return operation;
@@ -2359,18 +2347,6 @@ export function createConversationMethods(
         conversation.isTemporary = false;
       }
 
-      const newChatProjectId = conversation.chatProjectId ?? null;
-      const projectMembershipChanged = previousChatProjectId !== newChatProjectId;
-
-      /**
-       * A chat that moved between projects (e.g. a stale tab re-submitting an
-       * older project id) must fully recompute the stats of the project it left;
-       * the incremental path only ever touches the project it now belongs to.
-       */
-      if (projectMembershipChanged && previousChatProjectId) {
-        await refreshChatProjectStatsForUser(mongoose, userId, previousChatProjectId);
-      }
-
       if (conversation.chatProjectId) {
         const isRetentionVisibilityUpdate =
           typeof update.isTemporary === 'boolean' ||
@@ -2388,14 +2364,8 @@ export function createConversationMethods(
           conversation.isTemporary === true ||
           (conversation.expiredAt != null &&
             new Date(conversation.expiredAt).getTime() <= Date.now());
-        /**
-         * A move into this project (projectMembershipChanged) also needs a full
-         * refresh: the incremental path only bumps the count for brand-new inserts,
-         * so a pre-existing chat joining the project would otherwise be uncounted.
-         */
         const isNewConversation = conversationResult.lastErrorObject?.updatedExisting === false;
         const shouldRefreshProjectStats =
-          projectMembershipChanged ||
           isNewConversation ||
           typeof update.isArchived === 'boolean' ||
           Object.prototype.hasOwnProperty.call(unsetFields, 'isArchived') ||
@@ -2404,7 +2374,7 @@ export function createConversationMethods(
 
         if (shouldRefreshProjectStats) {
           await refreshChatProjectStatsForUser(mongoose, userId, conversation.chatProjectId);
-        } else {
+        } else if (!preserveUpdatedAt) {
           await updateChatProjectLastConversationForUser(
             mongoose,
             userId,

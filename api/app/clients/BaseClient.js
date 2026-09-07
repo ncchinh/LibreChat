@@ -1290,6 +1290,9 @@ class BaseClient {
       delete req.resolvedConversation;
     }
     const shouldSetCreatedAtOnInsert = !skippedExistingConvoLookup && existingConvo == null;
+    if (!shouldSetCreatedAtOnInsert) {
+      delete fieldsToKeep.chatProjectId;
+    }
 
     const unsetFields = {};
     const exceptions = new Set(['spec', 'iconURL']);

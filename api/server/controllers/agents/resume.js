@@ -46,6 +46,8 @@ const {
   createAgentEventActionRecorder,
   createAgentEventActorDetachedActionLifecycle,
   findAgentEventAppliedAction,
+  resolveChatProjectContext,
+  getChatProjectContextKey,
 } = require('@librechat/api');
 const { disposeClient } = require('~/server/cleanup');
 const { decryptMetadata } = require('~/server/services/ActionService');
@@ -57,6 +59,7 @@ const {
 const {
   saveMessage,
   getConvo,
+  getChatProject,
   getMessages,
   getFiles,
   getAgent,
@@ -193,6 +196,104 @@ async function deleteFailedResumeCheckpoint(args, context) {
 }
 
 const GENERIC_RESUME_ERROR = 'Resume failed';
+async function resolveResumeProjectContext(req, conversationId, { fresh = false } = {}) {
+  if (
+    !fresh &&
+    Object.prototype.hasOwnProperty.call(req, 'chatProjectContext') &&
+    req.chatProjectContext !== undefined
+  ) {
+    return req.chatProjectContext;
+  }
+  let context;
+  let refreshedConversation;
+  try {
+    const input = {
+      userId: req.user.id,
+      tenantId: req.user.tenantId,
+      conversationId,
+      ...(fresh ? {} : { resolvedConversation: req.resolvedConversation }),
+    };
+    context = await resolveChatProjectContext(input, {
+      getConvo: async (userId, id) => {
+        refreshedConversation = await getConvo(userId, id);
+        return refreshedConversation;
+      },
+      getChatProject,
+    });
+    if (fresh) {
+      req.resolvedConversation = refreshedConversation ?? null;
+    }
+  } catch (error) {
+    if (error?.message !== 'Project context unavailable') {
+      throw error;
+    }
+    context = null;
+  }
+  req.chatProjectContext = context;
+  return context;
+}
+
+async function rejectChangedProjectContext({
+  req,
+  res,
+  conversationId,
+  streamId,
+  job,
+  pendingAction,
+  generationProtocolVersion,
+  checkpointerCfg,
+  checkpointGeneration,
+  fresh = false,
+}) {
+  const currentContext = await resolveResumeProjectContext(req, conversationId, { fresh });
+  const currentKey = getChatProjectContextKey(currentContext);
+  const hasModelFacingProjectContext =
+    currentContext != null &&
+    (currentContext.instructions.trim() !== '' || currentContext.file_ids.length > 0);
+  if (typeof pendingAction?.projectContextKey !== 'string' && !hasModelFacingProjectContext) {
+    return false;
+  }
+  if (
+    typeof pendingAction?.projectContextKey === 'string' &&
+    pendingAction.projectContextKey === currentKey
+  ) {
+    return false;
+  }
+  let finalized = false;
+  try {
+    finalized =
+      (await GenerationJobManager.completeJob(
+        streamId,
+        'Project context changed before approval could be resumed',
+        job.createdAt,
+      )) === true;
+  } catch (error) {
+    logger.warn('[ResumeAgentController] Failed to finalize stale project-context resume', error);
+  }
+  if (finalized) {
+    await deleteResumedGenerationCheckpoint({
+      conversationId,
+      checkpointerCfg,
+      job,
+      checkpointGeneration,
+    }).catch((error) => {
+      logger.warn(
+        '[ResumeAgentController] Failed to prune stale project-context checkpoint',
+        getSafeErrorMetadata(error),
+      );
+    });
+  }
+  sendGenerationJson(
+    res,
+    409,
+    {
+      code: 'PROJECT_CONTEXT_CHANGED',
+      error: 'Project context changed; start a new turn.',
+    },
+    generationProtocolVersion,
+  );
+  return true;
+}
 
 const resumeContentProtectionDependencies = {
   getAgentCheckpointer,
@@ -1709,6 +1810,43 @@ const ResumeAgentController = async (req, res, next, initializeClient, addTitle)
           generationProtocolVersion,
         );
       }
+    }
+    // Re-read the authoritative conversation/project only after approvals.resolve
+    // wins its CAS. The approval CAS/epoch is the owner fence: a mismatch
+    // terminalizes only this claimed job before initializeClient can start provider
+    // or tool work.
+    const claimedProjectContextConflict = await rejectChangedProjectContext({
+      req,
+      res,
+      conversationId,
+      streamId,
+      job,
+      pendingAction,
+      generationProtocolVersion,
+      checkpointerCfg,
+      checkpointGeneration,
+      fresh: true,
+    });
+    if (claimedProjectContextConflict) {
+      await decrementPendingRequest(userId);
+      await releaseScheduleFence();
+      if (scheduleId) {
+        await recordScheduleOutcome({
+          scheduleId,
+          scheduledFor,
+          streamId,
+          jobCreatedAt: job.createdAt,
+          status: 'interrupted',
+          conversationId,
+          error: 'Project context changed before approval could be resumed',
+        }).catch((error) => {
+          logger.warn(
+            '[ResumeAgentController] Failed to record stale project-context schedule outcome',
+            getSafeErrorMetadata(error),
+          );
+        });
+      }
+      return;
     }
 
     eventLeaseTransferredToRun = true;

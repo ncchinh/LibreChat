@@ -6,6 +6,7 @@ import {
   Ref,
   RefAttributes,
 } from 'react';
+import type { ComponentProps } from 'react';
 import {
   OGDialogTitle,
   OGDialogClose,
@@ -67,6 +68,7 @@ type DialogTemplateProps = {
   showCloseButton?: boolean;
   showCancelButton?: boolean;
   onClose?: () => void;
+  onOpenAutoFocus?: ComponentProps<typeof OGDialogContent>['onOpenAutoFocus'];
 };
 
 const OGDialogTemplate: ForwardRefExoticComponent<
@@ -87,6 +89,7 @@ const OGDialogTemplate: ForwardRefExoticComponent<
     showCloseButton = false,
     overlayClassName,
     showCancelButton = true,
+    onOpenAutoFocus,
   } = props;
   const isLegacySelection = isSelectionProps(selection);
   const legacySelection = isLegacySelection ? selection : null;
@@ -120,6 +123,7 @@ const OGDialogTemplate: ForwardRefExoticComponent<
     <OGDialogContent
       overlayClassName={overlayClassName}
       showCloseButton={showCloseButton}
+      onOpenAutoFocus={onOpenAutoFocus}
       ref={ref}
       className={cn(
         /** `border-none` clears the default edge; the contrast variant has to

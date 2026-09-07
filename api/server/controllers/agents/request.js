@@ -397,7 +397,7 @@ async function saveErrorTurn(
     }
 
     const agentId = endpointOption?.agent_id ?? req.body?.agent_id;
-    const chatProjectId = endpointOption?.chatProjectId ?? req.body?.chatProjectId;
+    const chatProjectId = req.chatProjectContext?.projectId;
     const seedConvo = isNewConvo || req.resolvedConversation === null;
     const convoFields = seedConvo
       ? {
@@ -409,7 +409,7 @@ async function saveErrorTurn(
           ...(iconURL != null && { iconURL }),
           ...(endpointOption?.spec != null && { spec: endpointOption.spec }),
           ...(agentId != null && { agent_id: agentId }),
-          ...(typeof chatProjectId === 'string' && chatProjectId.length > 0 && { chatProjectId }),
+          ...(chatProjectId != null && { chatProjectId }),
         }
       : {};
     await saveConvo(

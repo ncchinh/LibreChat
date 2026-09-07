@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useId, useMemo, useState } from 'react';
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from 'react';
 import * as Ariakit from '@ariakit/react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Input, Button, Skeleton, DropdownPopup } from '@librechat/client';
@@ -17,8 +17,8 @@ import type { LocalizeFunction, MenuItemProps, RenderProp } from '~/common';
 import { useProjectsInfiniteQuery } from '~/data-provider';
 import ProjectCreateDialog from './ProjectCreateDialog';
 import ProjectDeleteDialog from './ProjectDeleteDialog';
-import ProjectEditDialog from './ProjectEditDialog';
 import ProjectsNavBar from './ProjectsNavBar';
+import ProjectEditor from './ProjectEditor';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
 
@@ -72,6 +72,8 @@ function ProjectCard({
 }) {
   const localize = useLocalize();
   const menuId = useId();
+  const navigationButtonRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
@@ -97,51 +99,69 @@ function ProjectCard({
   return (
     <article
       className={cn(
-        'group/project relative flex min-h-[9.5rem] flex-col rounded-2xl border border-border-light bg-surface-secondary',
+        'group/project relative flex min-h-[9.5rem] min-w-0 max-w-full flex-col rounded-2xl border border-border-light bg-surface-secondary',
         'transition-colors duration-150 ease-out hover:bg-surface-hover',
         'motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:fill-mode-both',
       )}
       style={{ animationDelay: `${Math.min(index, 8) * 40}ms` }}
     >
-      <button
-        type="button"
-        className="flex min-h-[9.5rem] flex-1 flex-col rounded-2xl p-4 pr-12 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-text-primary"
-        onClick={() => onOpen(project._id)}
-      >
-        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-tertiary text-text-secondary transition-colors group-hover/project:text-text-primary">
-          <Folder className="h-5 w-5" aria-hidden="true" />
-        </span>
-        <span className="mt-3 truncate text-base font-semibold tracking-tight text-text-primary">
-          {project.name}
-        </span>
-        {project.description ? (
-          <span className="mt-1 line-clamp-2 text-pretty text-sm leading-relaxed text-text-secondary">
-            {project.description}
+      {isEditOpen ? (
+        <div className="min-w-0 p-4 pr-12">
+          <ProjectEditor
+            project={project}
+            layout="card"
+            inputRef={inputRef}
+            onDone={() => {
+              setIsEditOpen(false);
+              requestAnimationFrame(() => navigationButtonRef.current?.focus());
+            }}
+          />
+        </div>
+      ) : (
+        <button
+          ref={navigationButtonRef}
+          type="button"
+          className="flex min-h-[9.5rem] w-full min-w-0 max-w-full flex-1 flex-col rounded-2xl p-4 pr-12 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-text-primary"
+          onClick={() => onOpen(project._id)}
+        >
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-tertiary text-text-secondary transition-colors group-hover/project:text-text-primary">
+            <Folder className="h-5 w-5" aria-hidden="true" />
           </span>
-        ) : null}
-        <span className="mt-auto flex items-center gap-2 pt-4 text-xs tabular-nums text-text-secondary">
-          <span>
-            {project.conversationCount === 1
-              ? localize('com_ui_project_chat_count_single')
-              : localize('com_ui_project_chat_count', {
-                  count: project.conversationCount,
-                })}
+          <span className="mt-3 line-clamp-2 min-w-0 max-w-full text-base font-semibold tracking-tight text-text-primary [overflow-wrap:anywhere] md:line-clamp-1">
+            {project.name}
           </span>
-          {activity ? (
-            <>
-              <span aria-hidden="true">·</span>
-              <time dateTime={project.lastConversationAt ?? project.updatedAt ?? project.createdAt}>
-                {activity}
-              </time>
-            </>
+          {project.description ? (
+            <span className="mt-1 line-clamp-2 min-w-0 max-w-full text-pretty text-sm leading-relaxed text-text-secondary [overflow-wrap:anywhere]">
+              {project.description}
+            </span>
           ) : null}
-        </span>
-      </button>
+          <span className="mt-auto flex min-w-0 max-w-full items-center gap-2 pt-4 text-xs tabular-nums text-text-secondary">
+            <span>
+              {project.conversationCount === 1
+                ? localize('com_ui_project_chat_count_single')
+                : localize('com_ui_project_chat_count', {
+                    count: project.conversationCount,
+                  })}
+            </span>
+            {activity ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <time
+                  dateTime={project.lastConversationAt ?? project.updatedAt ?? project.createdAt}
+                >
+                  {activity}
+                </time>
+              </>
+            ) : null}
+          </span>
+        </button>
+      )}
       <div className="absolute right-2 top-2">
         <DropdownPopup
           portal={true}
           focusLoop={true}
           unmountOnHide={true}
+          finalFocus={isEditOpen ? inputRef : undefined}
           menuId={menuId}
           isOpen={isMenuOpen}
           setIsOpen={setIsMenuOpen}
@@ -163,7 +183,6 @@ function ProjectCard({
           items={menuItems}
         />
       </div>
-      <ProjectEditDialog open={isEditOpen} onOpenChange={setIsEditOpen} project={project} />
       <ProjectDeleteDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen} project={project} />
     </article>
   );

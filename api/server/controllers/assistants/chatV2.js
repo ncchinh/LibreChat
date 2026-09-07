@@ -13,6 +13,9 @@ const {
   hasActiveFilePolicy,
   preflightAssistantRunContent,
   preflightAssistantUserMessageContent,
+  assertModelBoundContent,
+  resolveChatProjectContext,
+  formatChatProjectInstructions,
 } = require('@librechat/api');
 const {
   Time,
@@ -45,6 +48,7 @@ const {
   getTransactions,
   findBalanceByUser,
   upsertBalanceFields,
+  getChatProject,
   createAutoRefillTransaction,
   getFiles,
 } = require('~/models');
@@ -139,6 +143,29 @@ const chatV2 = async (req, res) => {
         await handleError(new Error('Request closed'));
       }
     });
+    let existingConversation = req.resolvedConversation;
+    if (existingConversation === undefined) {
+      existingConversation = convoId ? await getConvo(req.user.id, convoId) : null;
+    }
+    const projectContext = await resolveChatProjectContext(
+      {
+        userId: req.user.id,
+        tenantId: req.user.tenantId,
+        conversationId: convoId,
+        requestedProjectId: endpointOption?.chatProjectId ?? req.body?.chatProjectId,
+        resolvedConversation: existingConversation,
+      },
+      { getConvo, getChatProject },
+    );
+    const projectInstructions = formatChatProjectInstructions(projectContext);
+    req.chatProjectContext = projectContext;
+    if (projectInstructions) {
+      assertModelBoundContent({
+        filters: req.config?.filters,
+        legacyPii: req.config?.messageFilter?.pii,
+        agents: [{ instructions: projectInstructions }],
+      });
+    }
 
     if (convoId && !_thread_id) {
       completedRun = true;
@@ -251,20 +278,16 @@ const chatV2 = async (req, res) => {
       endpointOption,
       clientTimestamp,
     });
-
-    let existingConversationPromise;
-    const getExistingConversation = () => {
-      if (!convoId) {
-        return Promise.resolve(null);
-      }
-      existingConversationPromise ??= getConvo(req.user.id, convoId);
-      return existingConversationPromise;
-    };
+    if (projectInstructions) {
+      body.additional_instructions = [body.additional_instructions, projectInstructions]
+        .filter(Boolean)
+        .join('\n\n');
+    }
 
     const getRequestFileIds = async () => {
       let thread_file_ids = [];
       if (convoId) {
-        const convo = await getExistingConversation();
+        const convo = existingConversation;
         if (convo && convo.file_ids) {
           thread_file_ids = convo.file_ids;
         }

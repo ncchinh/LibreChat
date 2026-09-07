@@ -342,6 +342,8 @@ export interface PendingActionContext {
   interruptId?: string;
   /** LangGraph `thread_id` (`RunInterruptResult.threadId`) for cross-process resume. */
   threadId?: string;
+  /** Server-only project context key captured at pause time. */
+  projectContextKey?: string;
   /** Fingerprint of the graph-determining request fields; see {@link computeAgentRequestFingerprint}. */
   requestFingerprint?: string;
   /** Graph-determining fields to replay on resume; see {@link RESUME_CONTEXT_KEYS}. */
@@ -775,16 +777,17 @@ export function buildPendingAction(
     expiresAt,
     interruptId: ctx.interruptId,
     threadId: ctx.threadId,
+    projectContextKey: ctx.projectContextKey,
     requestFingerprint: ctx.requestFingerprint,
     resumeContext: ctx.resumeContext,
   };
 }
 
 /**
- * Client-facing projection of a pending action. `requestFingerprint` and `resumeContext`
- * are server-only replay state — `resumeContext` in particular carries the resolved
- * model parameters — so every copy that leaves the server (SSE, status, resume state)
- * must go through this. The full record stays in the job store for the resume route.
+ * Client-facing projection of a pending action. `projectContextKey`, `requestFingerprint`,
+ * and `resumeContext` are server-only replay state. `resumeContext` in particular carries
+ * the resolved model parameters, so every copy that leaves the server (SSE, status, resume
+ * state) must go through this. The full record stays in the job store for the resume route.
  */
 export function toClientPendingAction(
   pendingAction: Agents.PendingAction | undefined | null,
@@ -793,6 +796,7 @@ export function toClientPendingAction(
     return undefined;
   }
   const {
+    projectContextKey: _projectContextKey,
     requestFingerprint: _requestFingerprint,
     resumeContext: _resumeContext,
     ...clientSafe

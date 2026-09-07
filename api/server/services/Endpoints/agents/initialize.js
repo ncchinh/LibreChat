@@ -4,6 +4,7 @@ const {
   resolveSender,
   createConcurrencyLimiter,
   loadSkillStates,
+  resolveChatProjectContext,
   initializeAgent,
   primeInvokedSkillsForProfiles,
   validateAgentModel,
@@ -531,6 +532,29 @@ const initializeClient = async ({
     requestConversationPromise,
     toolRoleGrantsPromise,
   ]);
+  const requestedProjectId =
+    endpointOption.chatProjectId !== undefined
+      ? endpointOption.chatProjectId
+      : req.body?.chatProjectId;
+  const hasResolvedProjectContext = Object.prototype.hasOwnProperty.call(req, 'chatProjectContext');
+  const chatProjectContext = hasResolvedProjectContext
+    ? req.chatProjectContext
+    : await resolveChatProjectContext(
+        {
+          userId: req.user.id,
+          tenantId: req.user.tenantId,
+          conversationId,
+          requestedProjectId,
+          resolvedConversation: requestConversation,
+        },
+        {
+          getConvo: db.getConvo,
+          getChatProject: db.getChatProject,
+        },
+      );
+  req.chatProjectContext = chatProjectContext;
+  req.chatProjectContextEnabled = true;
+
   delete endpointOption.agent;
 
   /** The deployment switch AND the role grant. `initializeAgent` rebuilds
@@ -591,7 +615,6 @@ const initializeClient = async ({
       primaryAgent.skills = resolvedSkillIds.map((id) => id.toString());
     }
   }
-
   const primaryScopedSkillIds = resolveAgentScopedSkillIds({
     agent: primaryAgent,
     accessibleSkillIds,
@@ -611,9 +634,9 @@ const initializeClient = async ({
     skillsCapabilityEnabled,
     ephemeralSkillsToggle,
   });
-
   const primaryConfig = await initializeAgent(
     {
+      useChatProjectContext: true,
       req,
       res,
       loadTools,

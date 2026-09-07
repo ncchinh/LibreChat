@@ -137,6 +137,7 @@ export type TFile = {
   width?: number;
   height?: number;
   expiresAt?: string | Date;
+  expiredAt?: string | Date | null;
   preview?: string;
   text?: string;
   /**

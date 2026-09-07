@@ -34,6 +34,7 @@ jest.mock('@librechat/agents', () => ({
 
 import { Providers } from '@librechat/agents';
 import {
+  AgentCapabilities,
   Constants,
   ErrorTypes,
   EModelEndpoint,
@@ -41,7 +42,7 @@ import {
   Tools,
 } from 'librechat-data-provider';
 import type { IMongoFile } from '@librechat/data-schemas';
-import type { Agent } from 'librechat-data-provider';
+import type { Agent, TFile } from 'librechat-data-provider';
 import type { ServerRequest, InitializeResultBase, EndpointTokenConfig } from '~/types';
 import type { InitializeAgentDbMethods } from '../initialize';
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../initialize';
@@ -318,6 +319,174 @@ describe('initializeAgent — execution context', () => {
 
     expect(loadTools).toHaveBeenCalledWith(expect.not.objectContaining({ req: expect.anything() }));
     expect(loadTools).toHaveBeenCalledWith(expect.not.objectContaining({ res: expect.anything() }));
+  });
+});
+
+describe('initializeAgent: ChatProject context', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const projectContext = {
+    projectId: 'project-1',
+    contextRevision: 3,
+    instructions: 'Prefer concise project answers.',
+    file_ids: ['project-file'],
+  };
+
+  const projectFile = {
+    file_id: 'project-file',
+    filename: 'project.txt',
+    type: 'text/plain',
+    embedded: true,
+  } as TFile;
+
+  function projectRuntime() {
+    return {
+      user: createMocks().req.user,
+      appConfig: {
+        endpoints: {
+          [EModelEndpoint.agents]: {
+            capabilities: [AgentCapabilities.file_search],
+          },
+        },
+      } as NonNullable<ServerRequest['config']>,
+      requestBody: {},
+      turnStartedAt: 1,
+      chatProjectContext: projectContext,
+      chatProjectFiles: [projectFile],
+    };
+  }
+
+  it('keeps Agent and Project guidance exactly once in initialized output without mutating the definition', async () => {
+    const { agent, loadTools, db } = createMocks();
+    agent.instructions = 'Follow the Agent instructions.';
+    agent.additional_instructions = 'Agent dynamic guidance.';
+    const originalAdditionalInstructions = agent.additional_instructions;
+
+    const result = await initializeAgent(
+      {
+        runtime: projectRuntime(),
+        agent,
+        loadTools,
+        endpointOption: { endpoint: EModelEndpoint.agents },
+        allowedProviders: new Set([Providers.OPENAI]),
+        useChatProjectContext: true,
+      },
+      db,
+    );
+
+    expect(result.instructions).toBe('Follow the Agent instructions.');
+    expect(result.additional_instructions).toContain('Agent dynamic guidance.');
+    expect(result.additional_instructions).toContain(projectContext.instructions);
+    const additionalInstructions = result.additional_instructions ?? '';
+    expect(additionalInstructions.split('Agent dynamic guidance.').length - 1).toBe(1);
+    expect(additionalInstructions.split(projectContext.instructions).length - 1).toBe(1);
+    expect(additionalInstructions.split('Project guidance (user-provided context').length - 1).toBe(
+      1,
+    );
+    expect(agent.additional_instructions).toBe(originalAdditionalInstructions);
+  });
+
+  it('adds ready Project files only to enabled File Search resources', async () => {
+    const { agent, loadTools, db } = createMocks();
+    agent.tools = [Tools.file_search];
+    const originalTools = [...agent.tools];
+
+    const result = await initializeAgent(
+      {
+        runtime: projectRuntime(),
+        agent,
+        loadTools,
+        endpointOption: { endpoint: EModelEndpoint.agents },
+        allowedProviders: new Set([Providers.OPENAI]),
+        useChatProjectContext: true,
+      },
+      db,
+    );
+
+    expect(result.tool_resources).toEqual({
+      [EToolResources.file_search]: { files: [projectFile] },
+    });
+    expect(result.tool_resources?.[EToolResources.file_search]).not.toHaveProperty('file_ids');
+    expect(agent.tools).toEqual(originalTools);
+    expect(agent).not.toHaveProperty('tool_resources');
+  });
+
+  it('shares canonical hydration across concurrent graph agents', async () => {
+    const { agent, loadTools, db } = createMocks();
+    agent.tools = [Tools.file_search];
+    const getFiles = jest.fn().mockResolvedValue([
+      {
+        ...projectFile,
+        user: 'user-1',
+        filepath: '/uploads/project.txt',
+        context: 'message_attachment',
+      },
+    ]);
+    const projectDb = { ...db, getFiles };
+    const runtime = { ...projectRuntime(), chatProjectFiles: undefined };
+    const params = {
+      runtime,
+      agent,
+      loadTools,
+      endpointOption: { endpoint: EModelEndpoint.agents },
+      allowedProviders: new Set([Providers.OPENAI]),
+      useChatProjectContext: true,
+    };
+    const results = await Promise.all([
+      initializeAgent(params, projectDb),
+      initializeAgent(params, projectDb),
+    ]);
+    for (const result of results) {
+      expect(result.tool_resources?.[EToolResources.file_search]?.files).toEqual([
+        expect.objectContaining({ file_id: 'project-file', filepath: '/uploads/project.txt' }),
+      ]);
+    }
+    expect(getFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not inject Project guidance or resources into an auxiliary opt-out', async () => {
+    const { agent, loadTools, db } = createMocks();
+    agent.tools = [Tools.file_search];
+    agent.additional_instructions = 'Auxiliary Agent guidance.';
+
+    const result = await initializeAgent(
+      {
+        runtime: projectRuntime(),
+        agent,
+        loadTools,
+        endpointOption: { endpoint: EModelEndpoint.agents },
+        allowedProviders: new Set([Providers.OPENAI]),
+        useChatProjectContext: false,
+      },
+      db,
+    );
+
+    expect(result.additional_instructions).toBe('Auxiliary Agent guidance.');
+    expect(result.additional_instructions).not.toContain('Project guidance');
+    expect(result.tool_resources).toBeUndefined();
+  });
+
+  it('never enables disabled File Search for Project files', async () => {
+    const { agent, loadTools, db } = createMocks();
+
+    const result = await initializeAgent(
+      {
+        runtime: { ...projectRuntime(), chatProjectFiles: undefined },
+        agent,
+        loadTools,
+        endpointOption: { endpoint: EModelEndpoint.agents },
+        allowedProviders: new Set([Providers.OPENAI]),
+        useChatProjectContext: true,
+      },
+      db,
+    );
+
+    expect(result.tools).toEqual([]);
+    expect(result.toolDefinitions).toEqual([]);
+    expect(result.tool_resources).toBeUndefined();
+    expect(db.getFiles).not.toHaveBeenCalled();
   });
 });
 

@@ -13,6 +13,9 @@ const {
   hasActiveFilePolicy,
   preflightAssistantRunContent,
   preflightAssistantUserMessageContent,
+  assertModelBoundContent,
+  resolveChatProjectContext,
+  formatChatProjectInstructions,
 } = require('@librechat/api');
 const {
   Time,
@@ -52,6 +55,7 @@ const {
   getMultiplier,
   getConvo,
   getFiles,
+  getChatProject,
 } = require('~/models');
 const { logViolation, getLogStores } = require('~/cache');
 const { getOpenAIClient } = require('./helpers');
@@ -267,6 +271,29 @@ const chatV1 = async (req, res) => {
         await handleError(new Error('Request closed'));
       }
     });
+    let existingConversation = req.resolvedConversation;
+    if (existingConversation === undefined) {
+      existingConversation = convoId ? await getConvo(req.user.id, convoId) : null;
+    }
+    const projectContext = await resolveChatProjectContext(
+      {
+        userId: req.user.id,
+        tenantId: req.user.tenantId,
+        conversationId: convoId,
+        requestedProjectId: endpointOption?.chatProjectId ?? req.body?.chatProjectId,
+        resolvedConversation: existingConversation,
+      },
+      { getConvo, getChatProject },
+    );
+    const projectInstructions = formatChatProjectInstructions(projectContext);
+    req.chatProjectContext = projectContext;
+    if (projectInstructions) {
+      assertModelBoundContent({
+        filters: req.config?.filters,
+        legacyPii: req.config?.messageFilter?.pii,
+        agents: [{ instructions: projectInstructions }],
+      });
+    }
 
     if (convoId && !_thread_id) {
       completedRun = true;
@@ -379,7 +406,7 @@ const chatV1 = async (req, res) => {
     const getRequestFileIds = async () => {
       let thread_file_ids = [];
       if (convoId) {
-        const convo = await getConvo(req.user.id, convoId);
+        const convo = existingConversation;
         if (convo && convo.file_ids) {
           thread_file_ids = convo.file_ids;
         }
@@ -398,6 +425,11 @@ const chatV1 = async (req, res) => {
         }
       }
     };
+    if (projectInstructions) {
+      body.additional_instructions = [body.additional_instructions, projectInstructions]
+        .filter(Boolean)
+        .join('\n\n');
+    }
 
     const addVisionPrompt = async () => {
       if (!endpointOption.attachments) {

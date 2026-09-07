@@ -125,3 +125,48 @@ export const useAssignConversationToProjectMutation = (): UseMutationResult<
     },
   );
 };
+
+export type ProjectFileMutationVariables = {
+  projectId: string;
+  file_id: string;
+};
+
+export const useAddProjectFileMutation = (): UseMutationResult<
+  TChatProject,
+  unknown,
+  ProjectFileMutationVariables,
+  unknown
+> => {
+  const queryClient = useQueryClient();
+  return useMutation(
+    ({ projectId, file_id }: ProjectFileMutationVariables) =>
+      dataService.addProjectFile({ projectId, file_id }),
+    {
+      onSuccess: (project, variables) => {
+        queryClient.setQueryData([QueryKeys.project, variables.projectId], project);
+        queryClient.invalidateQueries([QueryKeys.projectFiles, variables.projectId]);
+        queryClient.invalidateQueries([QueryKeys.projects]);
+      },
+    },
+  );
+};
+
+export const useRemoveProjectFileMutation = (): UseMutationResult<
+  TChatProject,
+  unknown,
+  ProjectFileMutationVariables,
+  unknown
+> => {
+  const queryClient = useQueryClient();
+  return useMutation(
+    ({ projectId, file_id }: ProjectFileMutationVariables) =>
+      dataService.removeProjectFile({ projectId, file_id }),
+    {
+      onSuccess: (project, variables) => {
+        queryClient.setQueryData([QueryKeys.project, variables.projectId], project);
+        queryClient.invalidateQueries([QueryKeys.projectFiles, variables.projectId]);
+        queryClient.invalidateQueries([QueryKeys.projects]);
+      },
+    },
+  );
+};

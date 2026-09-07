@@ -81,6 +81,7 @@ const {
   executeAgentRun,
   waitForAgentExecutionWrites,
   resolveToolRoleGrants,
+  resolveChatProjectContext,
 } = require('@librechat/api');
 const {
   createResponsesToolEndCallback,
@@ -510,6 +511,53 @@ const executeResponse = async (envelope, { req, res }) => {
   // Request-backed tool adapters still observe the validated envelope payload;
   // shared initialization receives the transport-free runtime below.
   req.body = request;
+  let resolvedConversation;
+  if (request.previous_response_id != null) {
+    if (typeof request.previous_response_id !== 'string') {
+      return sendResponsesErrorResponse(
+        res,
+        400,
+        'previous_response_id must be a string',
+        'invalid_request',
+      );
+    }
+    try {
+      resolvedConversation = await db.getConvo(principal.userId, request.previous_response_id);
+      if (!resolvedConversation) {
+        return sendResponsesErrorResponse(res, 404, 'Conversation not found', 'not_found');
+      }
+      if (resolvedConversation.subagentThread != null) {
+        return sendResponsesErrorResponse(
+          res,
+          409,
+          CHILD_THREAD_READ_ONLY_ERROR,
+          'invalid_request',
+          'conversation_read_only',
+        );
+      }
+      req.resolvedConversation = resolvedConversation;
+      req.chatProjectContext = await resolveChatProjectContext(
+        {
+          userId: principal.userId,
+          tenantId: principal.tenantId,
+          conversationId: request.previous_response_id,
+          resolvedConversation,
+        },
+        { getConvo: db.getConvo, getChatProject: db.getChatProject },
+      );
+    } catch (error) {
+      logger.error(
+        '[Responses API] Conversation context resolution failed',
+        getSafeErrorMetadata(error),
+      );
+      return sendResponsesErrorResponse(
+        res,
+        error?.message === 'Project context unavailable' ? 404 : 500,
+        'Conversation context unavailable',
+        'server_error',
+      );
+    }
+  }
   req.turnStartedAt = envelope.receivedAt;
   const agentRuntime = createAgentExecutionContext({
     user: req.user,
@@ -519,6 +567,7 @@ const executeResponse = async (envelope, { req, res }) => {
     conversationCreatedAt: req.conversationCreatedAt,
     resolvedConversation: req.resolvedConversation,
     hasResolvedConversation: Object.prototype.hasOwnProperty.call(req, 'resolvedConversation'),
+    chatProjectContext: req.chatProjectContext,
   });
   const agentId = request.model;
   const manualSkills = extractManualSkills(req.body);
@@ -662,33 +711,6 @@ const executeResponse = async (envelope, { req, res }) => {
     },
     handleExecutionError: (error) => handleExecutionError({ error, res, appConfig }),
     execute: async (execution) => {
-      if (request.previous_response_id != null) {
-        if (typeof request.previous_response_id !== 'string') {
-          return sendResponsesErrorResponse(
-            res,
-            400,
-            'previous_response_id must be a string',
-            'invalid_request',
-          );
-        }
-        const previousConversation = await db.getConvo(
-          principal.userId,
-          request.previous_response_id,
-        );
-        if (!previousConversation) {
-          return sendResponsesErrorResponse(res, 404, 'Conversation not found', 'not_found');
-        }
-        if (previousConversation.subagentThread != null) {
-          return sendResponsesErrorResponse(
-            res,
-            409,
-            CHILD_THREAD_READ_ONLY_ERROR,
-            'invalid_request',
-            'conversation_read_only',
-          );
-        }
-      }
-
       const parentMessageId = null;
       const mcpRequestBody = createMCPRuntimeRequestBody({
         messageId: responseId,
@@ -819,6 +841,7 @@ const executeResponse = async (envelope, { req, res }) => {
           endpointOption,
           allowedProviders,
           isInitialAgent: true,
+          useChatProjectContext: true,
           accessibleSkillIds: primaryScopedSkillIds,
           skillAuthoringAvailable: canAuthorSkillFiles({
             agent,
@@ -883,6 +906,7 @@ const executeResponse = async (envelope, { req, res }) => {
           requestFiles: [],
           conversationId,
           parentMessageId,
+          useChatProjectContext: true,
           requestBody: mcpRequestBody,
           resourceType: ResourceType.REMOTE_AGENT,
           computeAccessibleSkillIds: (handoffAgent) =>

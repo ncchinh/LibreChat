@@ -1,0 +1,212 @@
+import userEvent from '@testing-library/user-event';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { TChatProjectFile, TFile, TFileUpload } from 'librechat-data-provider';
+import type * as ClientModule from '@librechat/client';
+import type * as ReactModule from 'react';
+import type { ReactNode } from 'react';
+import ProjectResources from './ProjectResources';
+
+const mockUploadMutateAsync = jest.fn();
+const mockAddMutateAsync = jest.fn();
+const mockRemoveMutateAsync = jest.fn();
+const mockRefetch = jest.fn();
+const mockShowToast = jest.fn();
+
+let projectFilesState: TChatProjectFile[] = [];
+let mockProjectQueryState = {
+  data: projectFilesState as TChatProjectFile[] | undefined,
+  isLoading: false,
+  isError: false,
+  refetch: mockRefetch,
+};
+let mockFileQueryState = { data: [] as TFile[], isLoading: false };
+
+jest.mock('@librechat/client', () => {
+  const React = jest.requireActual<typeof ReactModule>('react');
+  const actual = jest.requireActual<typeof ClientModule>('@librechat/client');
+  return {
+    Spinner: () => React.createElement('span', { 'aria-hidden': true }),
+    Alert: ({ children, role }: React.HTMLAttributes<HTMLDivElement>) =>
+      React.createElement('div', { role }, children),
+    Button: actual.Button,
+    DropdownPopup: actual.DropdownPopup,
+    EmptyState: actual.EmptyState,
+    FileUpload: React.forwardRef<
+      HTMLInputElement,
+      { children: ReactNode; handleFileChange: React.ChangeEventHandler<HTMLInputElement> }
+    >(({ children, handleFileChange }, ref) =>
+      React.createElement(
+        React.Fragment,
+        null,
+        children,
+        React.createElement('input', {
+          ref,
+          type: 'file',
+          'data-testid': 'project-upload-input',
+          onChange: handleFileChange,
+        }),
+      ),
+    ),
+    OGDialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
+      open ? React.createElement(React.Fragment, null, children) : null,
+    OGDialogContent: ({ children }: { children: ReactNode }) =>
+      React.createElement('div', null, children),
+    OGDialogHeader: ({ children }: { children: ReactNode }) =>
+      React.createElement('div', null, children),
+    OGDialogTitle: ({ children }: { children: ReactNode }) =>
+      React.createElement('h2', null, children),
+    TooltipAnchor: ({ render }: { render: ReactNode }) => render,
+    useToastContext: () => ({ showToast: mockShowToast }),
+  };
+});
+
+jest.mock('~/data-provider', () => ({
+  useProjectFilesQuery: () => mockProjectQueryState,
+  useGetFiles: () => mockFileQueryState,
+  useUploadFileMutation: () => ({ mutateAsync: mockUploadMutateAsync, isLoading: false }),
+  useAddProjectFileMutation: () => ({ mutateAsync: mockAddMutateAsync, isLoading: false }),
+  useRemoveProjectFileMutation: () => ({ mutateAsync: mockRemoveMutateAsync, isLoading: false }),
+}));
+
+jest.mock('~/hooks', () => ({
+  useLocalize: () => (key: string, options?: { count?: number; name?: string }) => {
+    const translations: Record<string, string> = {
+      com_ui_project_add_files: 'Add files',
+      com_ui_project_files: 'Reference files',
+      com_ui_project_files_help: 'Files are searched',
+      com_ui_project_files_retrieval_only: 'Retrieval only',
+      com_ui_project_upload_file: 'Upload file',
+      com_ui_project_choose_file: 'Choose an existing file',
+      com_ui_project_file_processing: 'Processing',
+      com_ui_project_file_failed: 'Upload failed',
+      com_ui_project_file_ready: 'Ready',
+      com_ui_project_file_unavailable: 'Unavailable',
+      com_ui_project_file_attach_error: 'Could not add this file',
+      com_ui_project_file_remove_error: 'Could not remove this file',
+      com_ui_project_files_error: 'Could not load project files',
+      com_ui_project_no_files: 'No reference files yet',
+      com_ui_project_no_eligible_files: 'No eligible indexed files',
+      com_ui_project_remove_file: `Remove ${options?.name ?? ''} from project`,
+      com_ui_project_dismiss_upload: `Dismiss ${options?.name ?? ''} upload`,
+      com_ui_retry: 'Retry',
+      com_ui_loading: 'Loading',
+    };
+    return (translations[key] ?? key).replace('{{count}}', String(options?.count ?? ''));
+  },
+}));
+
+const project = { _id: 'project-1', fileCount: 0 };
+const uploadedFile = {
+  file_id: 'canonical-file-id',
+  temp_file_id: 'different-temporary-id',
+  filename: 'reference.txt',
+  bytes: 10,
+  embedded: true,
+  context: 'message_attachment',
+  type: 'text/plain',
+} as unknown as TFileUpload;
+
+function renderResources() {
+  return render(<ProjectResources project={project} />);
+}
+
+describe('ProjectResources', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    projectFilesState = [];
+    mockProjectQueryState = {
+      data: projectFilesState,
+      isLoading: false,
+      isError: false,
+      refetch: mockRefetch,
+    };
+    mockFileQueryState = { data: [], isLoading: false };
+    mockAddMutateAsync.mockResolvedValue({});
+    mockRemoveMutateAsync.mockResolvedValue({});
+  });
+
+  it('renders loading, error, and empty states with recovery controls', () => {
+    mockProjectQueryState = { ...mockProjectQueryState, isLoading: true };
+    renderResources();
+    expect(screen.getByRole('status')).toBeInTheDocument();
+    cleanup();
+
+    mockProjectQueryState = { ...mockProjectQueryState, isLoading: false, isError: true };
+    renderResources();
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not load project files');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(mockRefetch).toHaveBeenCalled();
+    cleanup();
+
+    mockProjectQueryState = { ...mockProjectQueryState, isError: false };
+    renderResources();
+    expect(screen.getByText('No reference files yet')).toBeInTheDocument();
+  });
+
+  it('uses the canonical upload identity and exposes pending and failed attempts', async () => {
+    let resolveUpload: (file: TFileUpload) => void = () => undefined;
+    mockUploadMutateAsync.mockImplementation(
+      () => new Promise<TFileUpload>((resolve) => (resolveUpload = resolve)),
+    );
+    renderResources();
+    const input = screen.getByTestId('project-upload-input');
+    fireEvent.change(input, { target: { files: [new File(['x'], 'reference.txt')] } });
+    expect(screen.getByText('Processing')).toBeInTheDocument();
+
+    resolveUpload(uploadedFile);
+    await waitFor(() =>
+      expect(mockAddMutateAsync).toHaveBeenCalledWith({
+        projectId: 'project-1',
+        file_id: 'canonical-file-id',
+      }),
+    );
+    await waitFor(() => expect(screen.queryByText('Processing')).not.toBeInTheDocument());
+
+    mockUploadMutateAsync.mockRejectedValueOnce(new Error('upload failed'));
+    fireEvent.change(input, { target: { files: [new File(['y'], 'failed.txt')] } });
+    await waitFor(() => expect(screen.getByText('Upload failed')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Dismiss failed.txt upload' })).toBeInTheDocument();
+  });
+
+  it('retries a failed association without uploading another binary', async () => {
+    mockUploadMutateAsync.mockResolvedValue(uploadedFile);
+    mockAddMutateAsync.mockRejectedValueOnce(new Error('temporary association failure'));
+    renderResources();
+    fireEvent.change(screen.getByTestId('project-upload-input'), {
+      target: { files: [new File(['x'], 'reference.txt')] },
+    });
+    await screen.findByText('Upload failed');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText('Upload failed')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText('Processing')).not.toBeInTheDocument());
+    expect(mockUploadMutateAsync).toHaveBeenCalledTimes(1);
+    expect(mockAddMutateAsync).toHaveBeenLastCalledWith({
+      projectId: 'project-1',
+      file_id: 'canonical-file-id',
+    });
+  });
+
+  it('does not offer expired, Agent-scoped, or already attached files for reuse', async () => {
+    mockProjectQueryState = {
+      ...mockProjectQueryState,
+      data: [
+        { file_id: 'attached-id', filename: 'attached.txt', availability: 'ready' },
+        { file_id: 'gone-id', availability: 'unavailable' },
+      ],
+    };
+    mockFileQueryState.data = [
+      { ...uploadedFile, file_id: 'ready-id', filename: 'ready.txt' },
+      { ...uploadedFile, file_id: 'expired-id', filename: 'expired.txt', expiredAt: '2020-01-01' },
+      { ...uploadedFile, file_id: 'agent-id', filename: 'agent.txt', context: 'agents' },
+      { ...uploadedFile, file_id: 'attached-id', filename: 'attached.txt' },
+    ] as TFile[];
+    renderResources();
+    expect(screen.getByText('Unavailable')).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Add files' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Choose an existing file' }));
+    expect(await screen.findByRole('button', { name: /ready.txt/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /expired.txt|agent.txt/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^attached.txt/ })).not.toBeInTheDocument();
+  });
+});

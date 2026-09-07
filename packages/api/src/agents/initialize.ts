@@ -27,7 +27,7 @@ import type {
   TUser,
 } from 'librechat-data-provider';
 import type { GenericTool, LCToolRegistry, ToolMap, LCTool } from '@librechat/agents';
-import type { IMongoFile, FileOwnerScope } from '@librechat/data-schemas';
+import type { AppConfig, IMongoFile, FileOwnerScope } from '@librechat/data-schemas';
 import type { Response as ServerResponse } from 'express';
 import type {
   ResolvedManualSkill,
@@ -46,6 +46,7 @@ import type {
 import type { LCAvailableTools, RequestScopedMCPConnectionStore } from '../mcp/types';
 import type { ContentTraversalLimitError } from '../protection/adapters/nested';
 import type { SkillContentInput } from '../protection/adapters/submissions';
+import type { ResolvedChatProjectContext } from '../projects/context';
 import type { TextContentFragment } from '../protection/types';
 import type { TFilterFilesByAgentAccess } from './resources';
 import type { MCPToolAlias } from '~/tools/classification';
@@ -95,8 +96,10 @@ import { createConfiguredContentInspector, inspectContent } from '../protection/
 import { assertAgentAttachmentLimits, isModelBoundAttachmentFile } from './attachments';
 import { assertModelBoundContent } from '../middleware/modelBoundContent';
 import { registerMemoryTools, memoryToolUsageGuard } from './memory';
+import { formatChatProjectInstructions } from '../projects/context';
 import { applyIntentLabels, sanitizeIntentLabels } from './intent';
 import { ContentFilterError } from '../middleware/contentFilter';
+import { resolveChatProjectFiles } from '../projects/resources';
 import { createRequestAgentExecutionContext } from './runtime';
 import { filterFilesByEndpointRuntimeConfig } from '~/files';
 import { PARTIAL_RESOLVED_CONVERSATION } from './guard';
@@ -198,6 +201,48 @@ function appendAdditionalInstructions(agent: Agent, text?: string | null): void 
   agent.additional_instructions = [agent.additional_instructions ?? '', text]
     .filter(Boolean)
     .join('\n\n');
+}
+
+function appendProjectContextInstructions(
+  agent: Agent,
+  context: ResolvedChatProjectContext | null | undefined,
+): void {
+  const instruction = formatChatProjectInstructions(context);
+  if (instruction === '' || agent.additional_instructions?.includes(instruction)) {
+    return;
+  }
+  appendAdditionalInstructions(agent, instruction);
+}
+function addProjectFilesToFileSearch(
+  resources: AgentToolResources | undefined,
+  files: readonly TFile[] | undefined,
+  agent: Agent,
+  appConfig: AppConfig | undefined,
+): AgentToolResources | undefined {
+  if (files == null || files.length === 0) {
+    return resources;
+  }
+  const capabilities = appConfig?.endpoints?.[EModelEndpoint.agents]?.capabilities ?? [];
+  if (!capabilities.includes(AgentCapabilities.file_search)) {
+    return resources;
+  }
+  if (!agent.tools?.includes(Tools.file_search)) {
+    return resources;
+  }
+  const current = resources?.[EToolResources.file_search] ?? {};
+  const currentFiles = current.files ?? [];
+  const seen = new Set(currentFiles.map((file) => file.file_id));
+  const projectFiles = files.filter((file) => !seen.has(file.file_id));
+  if (projectFiles.length === 0) {
+    return resources;
+  }
+  return {
+    ...(resources ?? {}),
+    [EToolResources.file_search]: {
+      ...current,
+      files: currentFiles.concat(projectFiles),
+    },
+  };
 }
 
 /**
@@ -631,6 +676,8 @@ export interface InitializeAgentParams {
   allowedProviders: Set<string>;
   /** Whether this is the initial agent */
   isInitialAgent?: boolean;
+  /** Enables authoritative ChatProject guidance/resources for conversation graph agents. */
+  useChatProjectContext?: boolean;
   /** Accessible skill IDs for this user (pre-computed by the caller via ACL query) */
   accessibleSkillIds?: import('mongoose').Types.ObjectId[];
   /** Whether skill file authoring should be exposed even before a user has viewable skills. */
@@ -780,7 +827,7 @@ export async function initializeAgent(
   db?: InitializeAgentDbMethods,
 ): Promise<InitializedAgent> {
   const {
-    agent,
+    agent: inputAgent,
     loadTools,
     requestFiles = [],
     conversationId,
@@ -789,17 +836,29 @@ export async function initializeAgent(
     requestBody,
     allowedProviders,
     isInitialAgent = false,
+    useChatProjectContext,
   } = params;
   const runtime =
     params.runtime ?? (params.req ? createRequestAgentExecutionContext(params.req) : null);
   if (runtime == null) {
     throw new Error('initializeAgent requires an explicit execution context');
   }
+  const shouldUseChatProjectContext =
+    useChatProjectContext ?? params.req?.chatProjectContextEnabled === true;
+  const agent = shouldUseChatProjectContext ? { ...inputAgent } : inputAgent;
   const { user, appConfig } = runtime;
   const requestFileOwnerId = user?.id;
   const requestFileOwnerScope: FileOwnerScope | undefined = requestFileOwnerId
     ? { userId: requestFileOwnerId, tenantId: user?.tenantId }
     : undefined;
+
+  if (shouldUseChatProjectContext && runtime.chatProjectContext?.instructions.trim()) {
+    assertModelBoundContent({
+      filters: appConfig?.filters,
+      agents: [{ instructions: runtime.chatProjectContext.instructions }],
+    });
+    appendProjectContextInstructions(agent, runtime.chatProjectContext);
+  }
 
   if (!db) {
     throw new Error('initializeAgent requires db methods to be passed');
@@ -1260,6 +1319,44 @@ export async function initializeAgent(
     tool_resources: agent.tool_resources,
     requestFileSet: new Set(requestFiles?.map((file) => file.file_id)),
   });
+  const canUseProjectFileSearch =
+    shouldUseChatProjectContext &&
+    runtime.chatProjectContext != null &&
+    agent.tools?.includes(Tools.file_search) &&
+    (appConfig?.endpoints?.[EModelEndpoint.agents]?.capabilities ?? []).includes(
+      AgentCapabilities.file_search,
+    );
+  if (
+    canUseProjectFileSearch &&
+    runtime.chatProjectContext != null &&
+    runtime.chatProjectFiles == null &&
+    requestFileOwnerId
+  ) {
+    runtime.chatProjectFilesPromise ??=
+      params.req?.chatProjectFilesPromise ??
+      resolveChatProjectFiles({
+        project: runtime.chatProjectContext,
+        userId: requestFileOwnerId,
+        tenantId: user?.tenantId,
+        getFiles: db.getFiles as never,
+      });
+    if (params.req) {
+      params.req.chatProjectFilesPromise = runtime.chatProjectFilesPromise;
+    }
+    runtime.chatProjectFiles = await runtime.chatProjectFilesPromise;
+    if (params.req) {
+      params.req.chatProjectFiles = runtime.chatProjectFiles;
+    }
+  }
+  const projectRuntimeFiles: TFile[] = shouldUseChatProjectContext
+    ? (runtime.chatProjectFiles ?? [])
+    : [];
+  const runtimeToolResources = addProjectFilesToFileSearch(
+    tool_resources,
+    projectRuntimeFiles,
+    agent,
+    appConfig,
+  );
 
   /**
    * Pre-resolve manually-invoked + always-apply skill primes so their
@@ -1348,9 +1445,9 @@ export async function initializeAgent(
       provider,
       agentId: agent.id,
       tools,
-      model: agent.model,
+      model: agent.model_parameters?.model ?? agent.model ?? null,
       tool_options: agent.tool_options,
-      tool_resources,
+      tool_resources: runtimeToolResources,
       requestBody,
       codeExecutionContext,
       accessibleMcpServerNames: resolvedAuditNames,
@@ -1860,7 +1957,7 @@ export async function initializeAgent(
     toolRegistry,
     mcpAvailableTools,
     requestScopedConnections,
-    tool_resources,
+    tool_resources: runtimeToolResources,
     userMCPAuthMap,
     toolDefinitions,
     hasDeferredTools,

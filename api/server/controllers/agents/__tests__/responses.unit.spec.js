@@ -196,6 +196,7 @@ jest.mock('@librechat/agents', () => ({
 }));
 
 jest.mock('@librechat/api', () => ({
+  resolveChatProjectContext: jest.fn().mockResolvedValue(null),
   createAgentExecutionContext: (context) => context,
   /** Grants both by default; the capability set is what these specs vary. */
   resolveToolRoleGrants: jest.fn(async () => ({ runCode: true, fileSearch: true })),
