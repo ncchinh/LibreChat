@@ -1,6 +1,8 @@
 import { dataService, QueryKeys } from 'librechat-data-provider';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import type {
+  ProjectAvailableFilesParams,
+  ProjectAvailableFilesResponse,
   ProjectListParams,
   ProjectListResponse,
   TChatProject,
@@ -65,4 +67,24 @@ export const useProjectFilesQuery = (
       ...config,
     },
   );
+};
+export const useProjectAvailableFilesInfiniteQuery = (
+  projectId?: string | null,
+  params: ProjectAvailableFilesParams = {},
+  config?: UseInfiniteQueryOptions<ProjectAvailableFilesResponse, unknown>,
+) => {
+  const queryParams = { limit: params.limit, search: params.search };
+
+  return useInfiniteQuery<ProjectAvailableFilesResponse>({
+    queryKey: [QueryKeys.projectAvailableFiles, projectId, queryParams],
+    queryFn: ({ pageParam }) =>
+      dataService.getAvailableProjectFiles(projectId ?? '', {
+        ...queryParams,
+        cursor: pageParam?.toString(),
+      }),
+    getNextPageParam: (lastPage) => lastPage?.nextCursor ?? undefined,
+    enabled: Boolean(projectId),
+    refetchOnWindowFocus: false,
+    ...config,
+  });
 };

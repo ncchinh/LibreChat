@@ -52,6 +52,7 @@ export enum QueryKeys {
   projects = 'projects',
   project = 'project',
   projectFiles = 'projectFiles',
+  projectAvailableFiles = 'projectAvailableFiles',
   projectConversations = 'projectConversations',
   categories = 'categories',
   randomPrompts = 'randomPrompts',
@@ -104,6 +105,8 @@ export enum QueryKeys {
 export const DynamicQueryKeys = {
   agentFiles: (agentId: string) => ['agentFiles', agentId] as const,
   projectFiles: (projectId: string) => [QueryKeys.projectFiles, projectId] as const,
+  projectAvailableFiles: (projectId: string) =>
+    [QueryKeys.projectAvailableFiles, projectId] as const,
   codeEnvironmentStatus: (id: string) => [QueryKeys.codeEnvironments, id, 'status'] as const,
 } as const;
 

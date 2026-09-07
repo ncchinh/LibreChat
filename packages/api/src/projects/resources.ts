@@ -94,7 +94,7 @@ async function loadProjectFiles({
   return { fileIds, byId: new Map((files ?? []).map((file) => [file.file_id, file])) };
 }
 
-function toRuntimeFile(file: ProjectFileRecord): TFile {
+export function toRuntimeFile(file: ProjectFileRecord): TFile {
   return {
     file_id: file.file_id,
     filename: file.filename,

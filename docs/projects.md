@@ -11,6 +11,8 @@ other conversations in the Project.
 2. Use **Instructions** for guidance that should apply across its conversations. The description
    remains a human-facing summary; it is not sent as Project instructions.
 3. Under **Files**, use **Add files** to upload from your device or choose from your searchable files.
+   You can select multiple documents up to the remaining Project capacity. The existing-file
+   picker supports filename search and loads additional results in bounded pages.
 4. Start a conversation from the Project. Choose the model or Agent as usual.
 5. The conversation's Project indicator links back to the workspace, where instructions and
    reference availability can be inspected and edited.
@@ -115,9 +117,15 @@ Existing Project requests remain valid without the new optional fields.
 | GET    | `/api/projects/:projectId`                    | Read Project context and resource IDs                   |
 | PATCH  | `/api/projects/:projectId`                    | Edit name, description, or instructions                 |
 | GET    | `/api/projects/:projectId/files`              | Read safe resource metadata and availability            |
+| GET    | `/api/projects/:projectId/files/available`    | Search and paginate eligible files not already attached |
 | POST   | `/api/projects/:projectId/files`              | Attach `{ "file_id": "canonical-file-id" }`             |
 | DELETE | `/api/projects/:projectId/files/:fileId`      | Detach the reference, not the original                  |
 | PUT    | `/api/projects/conversations/:conversationId` | Assign `{ "projectId": "id" }`, or null to remove       |
+
+The available-file endpoint accepts `search`, `cursor`, and `limit` (20 by default, at most 50).
+It returns `{ files, nextCursor }`; treat the cursor as opaque and stop when it is null.
+Search text is matched literally against filenames, and candidates retain the same ownership,
+tenant, indexing, and expiry checks as file attachment.
 
 Instructions are limited to 16,000 characters and Project resources to 50 files. Resource additions
 are atomic, idempotent, and bounded even under concurrent writes. Invalid instructions are rejected,

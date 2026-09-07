@@ -19,7 +19,15 @@ let mockProjectQueryState = {
   isError: false,
   refetch: mockRefetch,
 };
-let mockFileQueryState = { data: [] as TFile[], isLoading: false };
+let mockAvailableFilesState = {
+  data: { pages: [{ files: [] as TFile[], nextCursor: null }] },
+  isLoading: false,
+  isFetchingNextPage: false,
+  hasNextPage: false,
+  fetchNextPage: jest.fn(),
+  isError: false,
+  refetch: mockRefetch,
+};
 
 jest.mock('@librechat/client', () => {
   const React = jest.requireActual<typeof ReactModule>('react');
@@ -31,6 +39,7 @@ jest.mock('@librechat/client', () => {
     Button: actual.Button,
     DropdownPopup: actual.DropdownPopup,
     EmptyState: actual.EmptyState,
+    Input: actual.Input,
     FileUpload: React.forwardRef<
       HTMLInputElement,
       { children: ReactNode; handleFileChange: React.ChangeEventHandler<HTMLInputElement> }
@@ -62,7 +71,7 @@ jest.mock('@librechat/client', () => {
 
 jest.mock('~/data-provider', () => ({
   useProjectFilesQuery: () => mockProjectQueryState,
-  useGetFiles: () => mockFileQueryState,
+  useProjectAvailableFilesInfiniteQuery: () => mockAvailableFilesState,
   useUploadFileMutation: () => ({ mutateAsync: mockUploadMutateAsync, isLoading: false }),
   useAddProjectFileMutation: () => ({ mutateAsync: mockAddMutateAsync, isLoading: false }),
   useRemoveProjectFileMutation: () => ({ mutateAsync: mockRemoveMutateAsync, isLoading: false }),
@@ -77,12 +86,14 @@ jest.mock('~/hooks', () => ({
       com_ui_project_files_retrieval_only: 'Retrieval only',
       com_ui_project_upload_file: 'Upload file',
       com_ui_project_choose_file: 'Choose an existing file',
+      com_ui_search_files: 'Search files',
       com_ui_project_file_processing: 'Processing',
       com_ui_project_file_failed: 'Upload failed',
       com_ui_project_file_ready: 'Ready',
       com_ui_project_file_unavailable: 'Unavailable',
       com_ui_project_file_attach_error: 'Could not add this file',
       com_ui_project_file_remove_error: 'Could not remove this file',
+      com_ui_project_file_excess: `Could not add ${options?.count ?? ''} selected file(s)`,
       com_ui_project_files_error: 'Could not load project files',
       com_ui_project_no_files: 'No reference files yet',
       com_ui_project_no_eligible_files: 'No eligible indexed files',
@@ -90,6 +101,7 @@ jest.mock('~/hooks', () => ({
       com_ui_project_dismiss_upload: `Dismiss ${options?.name ?? ''} upload`,
       com_ui_retry: 'Retry',
       com_ui_loading: 'Loading',
+      com_ui_load_more: 'Load more',
     };
     return (translations[key] ?? key).replace('{{count}}', String(options?.count ?? ''));
   },
@@ -120,7 +132,15 @@ describe('ProjectResources', () => {
       isError: false,
       refetch: mockRefetch,
     };
-    mockFileQueryState = { data: [], isLoading: false };
+    mockAvailableFilesState = {
+      data: { pages: [{ files: [], nextCursor: null }] },
+      isLoading: false,
+      isFetchingNextPage: false,
+      hasNextPage: false,
+      fetchNextPage: jest.fn(),
+      isError: false,
+      refetch: mockRefetch,
+    };
     mockAddMutateAsync.mockResolvedValue({});
     mockRemoveMutateAsync.mockResolvedValue({});
   });
@@ -167,6 +187,39 @@ describe('ProjectResources', () => {
     await waitFor(() => expect(screen.getByText('Upload failed')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Dismiss failed.txt upload' })).toBeInTheDocument();
   });
+  it('reserves remaining capacity across overlapping multi-file selections', async () => {
+    let finishFirstUpload!: (file: TFileUpload) => void;
+    mockProjectQueryState = { ...mockProjectQueryState, data: undefined, isLoading: true };
+    mockUploadMutateAsync
+      .mockImplementationOnce(
+        () => new Promise<TFileUpload>((resolve) => (finishFirstUpload = resolve)),
+      )
+      .mockResolvedValueOnce({ ...uploadedFile, file_id: 'second-canonical-id' });
+    render(<ProjectResources project={{ ...project, fileCount: 48 }} />);
+    const input = screen.getByTestId('project-upload-input');
+    fireEvent.change(input, {
+      target: {
+        files: [
+          new File(['a'], 'first.txt'),
+          new File(['b'], 'second.txt'),
+          new File(['c'], 'excess.txt'),
+        ],
+      },
+    });
+    fireEvent.change(input, { target: { files: [new File(['d'], 'another-excess.txt')] } });
+    expect(mockUploadMutateAsync).toHaveBeenCalledTimes(1);
+    expect(mockShowToast).toHaveBeenCalledTimes(2);
+    expect(mockShowToast).toHaveBeenLastCalledWith(
+      expect.objectContaining({ message: 'Could not add 1 selected file(s)' }),
+    );
+    finishFirstUpload(uploadedFile);
+    await waitFor(() => expect(mockAddMutateAsync).toHaveBeenCalledTimes(2));
+    expect(mockUploadMutateAsync).toHaveBeenCalledTimes(2);
+    expect(mockAddMutateAsync.mock.calls.map(([payload]) => payload.file_id)).toEqual([
+      uploadedFile.file_id,
+      'second-canonical-id',
+    ]);
+  });
 
   it('retries a failed association without uploading another binary', async () => {
     mockUploadMutateAsync.mockResolvedValue(uploadedFile);
@@ -186,7 +239,7 @@ describe('ProjectResources', () => {
     });
   });
 
-  it('does not offer expired, Agent-scoped, or already attached files for reuse', async () => {
+  it('lists server-filtered files and preserves unit-bearing file sizes', async () => {
     mockProjectQueryState = {
       ...mockProjectQueryState,
       data: [
@@ -194,19 +247,24 @@ describe('ProjectResources', () => {
         { file_id: 'gone-id', availability: 'unavailable' },
       ],
     };
-    mockFileQueryState.data = [
-      { ...uploadedFile, file_id: 'ready-id', filename: 'ready.txt', bytes: 12800 },
-      { ...uploadedFile, file_id: 'expired-id', filename: 'expired.txt', expiredAt: '2020-01-01' },
-      { ...uploadedFile, file_id: 'agent-id', filename: 'agent.txt', context: 'agents' },
-      { ...uploadedFile, file_id: 'attached-id', filename: 'attached.txt' },
-    ] as TFile[];
+    mockAvailableFilesState = {
+      ...mockAvailableFilesState,
+      data: {
+        pages: [
+          {
+            files: [
+              { ...uploadedFile, file_id: 'ready-id', filename: 'ready.txt', bytes: 12800 },
+            ] as TFile[],
+            nextCursor: null,
+          },
+        ],
+      },
+    };
     renderResources();
     expect(screen.getByText('Unavailable')).toBeInTheDocument();
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Add files' }));
     await user.click(screen.getByRole('menuitem', { name: 'Choose an existing file' }));
     expect(await screen.findByRole('button', { name: /ready.txt/ })).toHaveTextContent('12.5 KB');
-    expect(screen.queryByRole('button', { name: /expired.txt|agent.txt/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^attached.txt/ })).not.toBeInTheDocument();
   });
 });

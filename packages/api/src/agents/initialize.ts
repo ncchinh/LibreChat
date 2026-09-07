@@ -216,8 +216,9 @@ function appendProjectContextInstructions(
 function addProjectFilesToFileSearch(
   resources: AgentToolResources | undefined,
   files: readonly TFile[] | undefined,
-  agent: Agent,
+  effectiveToolNames: readonly string[],
   appConfig: AppConfig | undefined,
+  fileSearchAvailable?: boolean,
 ): AgentToolResources | undefined {
   if (files == null || files.length === 0) {
     return resources;
@@ -226,7 +227,10 @@ function addProjectFilesToFileSearch(
   if (!capabilities.includes(AgentCapabilities.file_search)) {
     return resources;
   }
-  if (!agent.tools?.includes(Tools.file_search)) {
+  if (fileSearchAvailable === false) {
+    return resources;
+  }
+  if (!effectiveToolNames.includes(Tools.file_search)) {
     return resources;
   }
   const current = resources?.[EToolResources.file_search] ?? {};
@@ -1061,7 +1065,56 @@ export async function initializeAgent(
   }
 
   let currentFiles: IMongoFile[] | undefined;
+  const baseToolNames = agent.tools ?? [];
+  /**
+   * Pre-resolve manually-invoked + always-apply skill primes so their
+   * `allowed-tools` can be unioned into the agent's effective tool set
+   * BEFORE project resource hydration and `loadTools` run. Project files
+   * must follow this same effective set, otherwise a skill-added
+   * `file_search` tool cannot see its eligible Project files.
+   */
+  if (hasSkillAccess) {
+    /** Skill `allowed-tools` are legacy-heal candidates too: a raw MCP key
+     * declared before the normalized-key convention would neither dedupe
+     * against the healed agent tools nor match the normalized-keyed tool
+     * map, silently dropping the skill-contributed tool. Same lazy audit
+     * and skip-on-unavailable semantics as the agent-key heal. */
+    const combinedPrimes = [...(manualSkillPrimes ?? []), ...(alwaysApplySkillPrimes ?? [])];
+    const primesNeedHeal = combinedPrimes.some((prime) =>
+      prime.allowedTools?.some((name) => name.includes(Constants.mcp_delimiter)),
+    );
+    const primeHealNames = primesNeedHeal ? await resolveHealNames() : null;
+    if (primeHealNames != null) {
+      resolvedAuditNames = primeHealNames;
+    }
+    const primesForUnion =
+      primeHealNames != null
+        ? combinedPrimes.map((prime) =>
+            prime.allowedTools?.length
+              ? {
+                  ...prime,
+                  allowedTools: normalizeAgentToolKeys({
+                    tools: prime.allowedTools,
+                    toolOptions: undefined,
+                    rawServerNames: primeHealNames,
+                  }).tools,
+                }
+              : prime,
+          )
+        : combinedPrimes;
+    if (primesForUnion.length > 0) {
+      const union = unionPrimeAllowedTools({
+        primes: primesForUnion,
+        agentToolNames: baseToolNames,
+      });
+      extraAllowedToolNames = union.extraToolNames;
+      perSkillExtras = union.perSkillExtras;
+    }
+  }
 
+  const effectiveToolNames =
+    extraAllowedToolNames.length > 0 ? [...baseToolNames, ...extraAllowedToolNames] : baseToolNames;
+  const requestedToolNames = effectiveToolNames;
   const _modelOptions = structuredClone(
     Object.assign(
       { model: agent.model },
@@ -1283,6 +1336,15 @@ export async function initializeAgent(
     files: currentFiles,
   });
 
+  const canUseProjectFileSearch =
+    shouldUseChatProjectContext &&
+    runtime.chatProjectContext != null &&
+    effectiveToolNames.includes(Tools.file_search) &&
+    params.fileSearchAvailable !== false &&
+    (appConfig?.endpoints?.[EModelEndpoint.agents]?.capabilities ?? []).includes(
+      AgentCapabilities.file_search,
+    );
+
   /**
    * Usage accounting is the first file mutation. It runs only after every
    * hydrated file in the exact snapshot above has passed endpoint filtering
@@ -1319,13 +1381,6 @@ export async function initializeAgent(
     tool_resources: agent.tool_resources,
     requestFileSet: new Set(requestFiles?.map((file) => file.file_id)),
   });
-  const canUseProjectFileSearch =
-    shouldUseChatProjectContext &&
-    runtime.chatProjectContext != null &&
-    agent.tools?.includes(Tools.file_search) &&
-    (appConfig?.endpoints?.[EModelEndpoint.agents]?.capabilities ?? []).includes(
-      AgentCapabilities.file_search,
-    );
   if (
     canUseProjectFileSearch &&
     runtime.chatProjectContext != null &&
@@ -1351,77 +1406,23 @@ export async function initializeAgent(
   const projectRuntimeFiles: TFile[] = shouldUseChatProjectContext
     ? (runtime.chatProjectFiles ?? [])
     : [];
-  const runtimeToolResources = addProjectFilesToFileSearch(
+  let runtimeToolResources = addProjectFilesToFileSearch(
     tool_resources,
     projectRuntimeFiles,
-    agent,
+    effectiveToolNames,
     appConfig,
+    params.fileSearchAvailable,
   );
-
-  /**
-   * Pre-resolve manually-invoked + always-apply skill primes so their
-   * `allowed-tools` can be unioned into the agent's effective tool set
-   * BEFORE `loadTools` runs. Single load is correctness-critical: a
-   * second `loadTools` pass would compute its own `userMCPAuthMap` /
-   * `toolContextMap` / OAuth flow state that the InitializedAgent never
-   * sees, so an MCP tool added via `allowed-tools` would be visible to
-   * the model but fail at execution time without its per-user auth
-   * context.
-   *
-   * Resolution uses `params.accessibleSkillIds` (not the active-filtered
-   * subset that `injectSkillCatalog` will produce later) — see
-   * `resolveManualSkills` doc for why a skill outside the catalog cap can
-   * still be authorizable for direct manual invocation.
-   *
-   * Manual + always-apply primes feed the same `unionPrimeAllowedTools`
-   * call — the helper is pure / set-based, so concatenating the two
-   * lists gives the right union with no double-counting. Manual primes
-   * go first so their names win on dedup (primes earlier in the list
-   * contribute before the same name gets deduped on a later prime).
-   */
-  if (hasSkillAccess) {
-    /** Skill `allowed-tools` are legacy-heal candidates too: a raw MCP key
-     *  declared before the normalized-key convention would neither dedupe
-     *  against the healed agent tools nor match the normalized-keyed tool
-     *  map, silently dropping the skill-contributed tool. Same lazy audit
-     *  and skip-on-unavailable semantics as the agent-key heal. */
-    const combinedPrimes = [...(manualSkillPrimes ?? []), ...(alwaysApplySkillPrimes ?? [])];
-    const primesNeedHeal = combinedPrimes.some((prime) =>
-      prime.allowedTools?.some((name) => name.includes(Constants.mcp_delimiter)),
-    );
-    const primeHealNames = primesNeedHeal ? await resolveHealNames() : null;
-    if (primeHealNames != null) {
-      resolvedAuditNames = primeHealNames;
+  const dropFileSearchResources = (): void => {
+    if (runtimeToolResources?.[EToolResources.file_search] == null) {
+      return;
     }
-    const primesForUnion =
-      primeHealNames != null
-        ? combinedPrimes.map((prime) =>
-            prime.allowedTools?.length
-              ? {
-                  ...prime,
-                  allowedTools: normalizeAgentToolKeys({
-                    tools: prime.allowedTools,
-                    toolOptions: undefined,
-                    rawServerNames: primeHealNames,
-                  }).tools,
-                }
-              : prime,
-          )
-        : combinedPrimes;
-    if (primesForUnion.length > 0) {
-      const union = unionPrimeAllowedTools({
-        primes: primesForUnion,
-        agentToolNames: agent.tools ?? [],
-      });
-      extraAllowedToolNames = union.extraToolNames;
-      perSkillExtras = union.perSkillExtras;
-    }
+    const { [EToolResources.file_search]: _fileSearch, ...remaining } = runtimeToolResources;
+    runtimeToolResources = Object.keys(remaining).length > 0 ? remaining : undefined;
+  };
+  if (params.fileSearchAvailable === false || !effectiveToolNames.includes(Tools.file_search)) {
+    dropFileSearchResources();
   }
-
-  const baseToolNames = agent.tools ?? [];
-  const requestedToolNames =
-    extraAllowedToolNames.length > 0 ? [...baseToolNames, ...extraAllowedToolNames] : baseToolNames;
-
   /**
    * `loadTools` failures take two forms:
    *   1. The wrapper throws — rare; only when something around the
@@ -1467,6 +1468,9 @@ export async function initializeAgent(
         `[allowedTools] loadTools threw with ${extraAllowedToolNames.length} skill-added extra(s); retrying without them`,
         { errorName: err instanceof Error ? err.name : 'UnknownError' },
       );
+      if (!baseToolNames.includes(Tools.file_search)) {
+        dropFileSearchResources();
+      }
       loadToolsResult = await callLoadTools(baseToolNames);
     } else {
       throw err;
@@ -1479,6 +1483,9 @@ export async function initializeAgent(
     logger.warn(
       `[allowedTools] loadTools returned no result with ${extraAllowedToolNames.length} skill-added extra(s); retrying without them.`,
     );
+    if (!baseToolNames.includes(Tools.file_search)) {
+      dropFileSearchResources();
+    }
     loadToolsResult = await callLoadTools(baseToolNames);
   }
 

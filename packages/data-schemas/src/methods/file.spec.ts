@@ -120,6 +120,89 @@ describe('File Methods', () => {
     });
   });
 
+  describe('getAvailableProjectFiles', () => {
+    it('paginates only eligible owner files with stable cursors and literal search', async () => {
+      const userId = new mongoose.Types.ObjectId().toString();
+      const now = new Date('2026-01-01T00:00:00.000Z');
+      const base = {
+        user: userId,
+        tenantId: 'tenant-a',
+        filename: 'Report excluded.txt',
+        filepath: '/uploads/report',
+        object: 'file',
+        type: 'text/plain',
+        bytes: 1,
+        usage: 0,
+        embedded: true,
+        context: FileContext.message_attachment,
+        text: 'secret',
+        storageKey: 'internal-storage-key',
+      };
+      await File.create([
+        { ...base, file_id: 'report-1', filename: 'Report [literal].txt' },
+        { ...base, file_id: 'report-2', filename: 'Report two.txt' },
+        {
+          ...base,
+          file_id: 'expired',
+          expiredAt: new Date('2025-12-31T23:59:59.000Z'),
+        },
+        { ...base, file_id: 'foreign-tenant', tenantId: 'tenant-b' },
+        { ...base, file_id: 'foreign-owner', user: new mongoose.Types.ObjectId().toString() },
+        { ...base, file_id: 'agent-knowledge', context: FileContext.agents },
+        { ...base, file_id: 'not-indexed', embedded: false },
+        { ...base, file_id: 'attached' },
+      ]);
+
+      const first = await fileMethods.getAvailableProjectFiles({
+        userId,
+        tenantId: 'tenant-a',
+        excludedFileIds: ['attached'],
+        limit: 1,
+        search: 'report',
+        now,
+      });
+      await File.updateOne(
+        { file_id: first.files[0].file_id },
+        { $set: { filename: `Report ${'renamed'.repeat(100)}` } },
+      );
+      const second = await fileMethods.getAvailableProjectFiles({
+        userId,
+        tenantId: 'tenant-a',
+        excludedFileIds: ['attached'],
+        limit: 1,
+        search: 'report',
+        cursor: first.nextCursor,
+        now,
+      });
+
+      expect(first.files).toHaveLength(1);
+      expect(second.files).toHaveLength(1);
+      expect(first.files[0].file_id).toBe('report-2');
+      expect(second.files[0].file_id).toBe('report-1');
+      expect(first.nextCursor).toEqual(expect.any(String));
+      expect(second.nextCursor).toBeNull();
+      expect(first.files[0]).not.toHaveProperty('text');
+      expect(second.files[0]).not.toHaveProperty('storageKey');
+      const literalMatch = await fileMethods.getAvailableProjectFiles({
+        userId,
+        tenantId: 'tenant-a',
+        search: '[literal]',
+        now,
+      });
+      expect(literalMatch.files.map((file) => file.file_id)).toEqual(['report-1']);
+    });
+
+    it.each([0, 51, 1.5])('rejects an unbounded page size: %p', async (limit) => {
+      await expect(
+        fileMethods.getAvailableProjectFiles({
+          userId: new mongoose.Types.ObjectId().toString(),
+          tenantId: 'tenant-a',
+          limit,
+        }),
+      ).rejects.toThrow('Invalid project file limit');
+    });
+  });
+
   describe('claimCodeFile', () => {
     it('claims code output files independently per tenant', async () => {
       const userId = new mongoose.Types.ObjectId().toString();

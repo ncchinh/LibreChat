@@ -1,6 +1,15 @@
-import { isValidObjectIdString, logger } from '@librechat/data-schemas';
 import { MAX_CHAT_PROJECT_INSTRUCTIONS_LENGTH } from 'librechat-data-provider';
+import {
+  DEFAULT_AVAILABLE_PROJECT_FILES_LIMIT,
+  InvalidAvailableProjectFilesCursorError,
+  MAX_AVAILABLE_PROJECT_FILES_LIMIT,
+  parseAvailableProjectFilesCursor,
+  logger,
+  isValidObjectIdString,
+} from '@librechat/data-schemas';
 import type {
+  AvailableProjectFilesOptions,
+  AvailableProjectFilesResult,
   ChatProjectMethods,
   ChatProjectSortBy,
   ChatProjectSortDirection,
@@ -8,7 +17,8 @@ import type {
   UpdateChatProjectInput,
 } from '@librechat/data-schemas';
 import type { Request, Response } from 'express';
-import { listChatProjectFileViews, type GetProjectFiles } from './resources';
+import type { GetProjectFiles } from './resources';
+import { toRuntimeFile, listChatProjectFileViews } from './resources';
 import { normalizeLimit, queryString } from '~/utils';
 
 const PROJECT_NOT_FOUND = 'Project not found';
@@ -41,12 +51,27 @@ type ProjectHandlerDependencies = Pick<
   | 'removeChatProjectFile'
 > & {
   getFiles: GetProjectFiles;
+  getAvailableProjectFiles: (
+    options: AvailableProjectFilesOptions,
+  ) => Promise<AvailableProjectFilesResult>;
 };
 
 const getUserId = (req: ProjectRequest): string => req.user?.id ?? req.user?._id?.toString() ?? '';
 
 const normalizeString = (value: string | null | undefined): string =>
   typeof value === 'string' ? value.trim() : '';
+
+const parseAvailableProjectFilesLimit = (value: Request['query'][string]): number | null => {
+  const raw = queryString(value);
+  if (raw === undefined) {
+    return DEFAULT_AVAILABLE_PROJECT_FILES_LIMIT;
+  }
+  if (!/^[1-9]\d*$/.test(raw)) {
+    return null;
+  }
+  const limit = Number(raw);
+  return Number.isSafeInteger(limit) && limit <= MAX_AVAILABLE_PROJECT_FILES_LIMIT ? limit : null;
+};
 
 const normalizeSortBy = (value: Request['query'][string]): ChatProjectSortBy | undefined => {
   const sortBy = queryString(value);
@@ -103,6 +128,7 @@ export function createProjectHandlers(deps: ProjectHandlerDependencies): {
   updateProject: (req: ProjectRequest, res: Response) => Promise<Response>;
   deleteProject: (req: ProjectRequest, res: Response) => Promise<Response>;
   listProjectFiles: (req: ProjectRequest, res: Response) => Promise<Response>;
+  listAvailableProjectFiles: (req: ProjectRequest, res: Response) => Promise<Response>;
   addProjectFile: (req: ProjectRequest, res: Response) => Promise<Response>;
   removeProjectFile: (req: ProjectRequest, res: Response) => Promise<Response>;
 } {
@@ -245,6 +271,46 @@ export function createProjectHandlers(deps: ProjectHandlerDependencies): {
     }
   }
 
+  async function listAvailableProjectFiles(req: ProjectRequest, res: Response): Promise<Response> {
+    const { projectId } = req.params;
+    if (!isValidObjectIdString(projectId)) {
+      return res.status(404).json({ error: PROJECT_NOT_FOUND });
+    }
+
+    const limit = parseAvailableProjectFilesLimit(req.query.limit);
+    const cursor = queryString(req.query.cursor);
+    if (limit == null || cursor === '') {
+      return res.status(400).json({ error: 'Invalid project file pagination' });
+    }
+
+    try {
+      parseAvailableProjectFilesCursor(cursor);
+      const userId = getUserId(req);
+      const project = await deps.getChatProject(userId, projectId);
+      if (!project || (project.tenantId ?? null) !== (req.user?.tenantId ?? null)) {
+        return res.status(404).json({ error: PROJECT_NOT_FOUND });
+      }
+      const result = await deps.getAvailableProjectFiles({
+        userId,
+        tenantId: project.tenantId ?? null,
+        excludedFileIds: project.file_ids ?? [],
+        limit,
+        cursor: cursor ?? null,
+        search: queryString(req.query.search),
+      });
+      return res.status(200).json({
+        files: result.files.map(toRuntimeFile),
+        nextCursor: result.nextCursor,
+      });
+    } catch (error) {
+      if (error instanceof InvalidAvailableProjectFilesCursorError || error instanceof RangeError) {
+        return res.status(400).json({ error: 'Invalid project file pagination' });
+      }
+      logger.error('[projects] Error listing available project files', error);
+      return res.status(500).json({ error: 'Error listing available project files' });
+    }
+  }
+
   async function addProjectFile(req: ProjectRequest, res: Response): Promise<Response> {
     const { projectId } = req.params;
     if (!isValidObjectIdString(projectId)) {
@@ -320,6 +386,7 @@ export function createProjectHandlers(deps: ProjectHandlerDependencies): {
     updateProject,
     deleteProject,
     listProjectFiles,
+    listAvailableProjectFiles,
     addProjectFile,
     removeProjectFile,
   };

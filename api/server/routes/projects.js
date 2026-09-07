@@ -14,12 +14,14 @@ const handlers = createProjectHandlers({
   addChatProjectFile: db.addChatProjectFile,
   removeChatProjectFile: db.removeChatProjectFile,
   getFiles: db.getFiles,
+  getAvailableProjectFiles: db.getAvailableProjectFiles,
 });
 router.use(requireJwtAuth);
 
 router.get('/', handlers.listProjects);
 router.post('/', handlers.createProject);
 router.put('/conversations/:conversationId', handlers.assignConversationToProject);
+router.get('/:projectId/files/available', handlers.listAvailableProjectFiles);
 router.get('/:projectId/files', handlers.listProjectFiles);
 router.post('/:projectId/files', handlers.addProjectFile);
 router.delete('/:projectId/files/:fileId', handlers.removeProjectFile);

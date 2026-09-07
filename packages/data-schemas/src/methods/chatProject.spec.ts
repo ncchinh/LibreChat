@@ -564,7 +564,7 @@ describe('persistent Project context', () => {
     ).rejects.toThrow('Invalid project instructions');
   });
 
-  it('accepts old documents without context fields and initializes them on first edit', async () => {
+  it('initializes legacy context fields only when their normalized content changes', async () => {
     const { insertedId } = await ChatProject.collection.insertOne({
       name: 'Legacy',
       user: owner,
@@ -575,6 +575,8 @@ describe('persistent Project context', () => {
       hasInstructions: false,
       fileCount: 0,
     });
+    await methods.updateChatProject(owner, id, { instructions: '' });
+    expect((await methods.getChatProject(owner, id))?.contextRevision ?? 0).toBe(0);
     const updated = await methods.updateChatProject(owner, id, { instructions: 'New context' });
     expect(updated).toMatchObject({ instructions: 'New context', contextRevision: 1 });
     await createReference('legacy-ref');

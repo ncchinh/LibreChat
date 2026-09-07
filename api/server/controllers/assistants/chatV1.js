@@ -321,11 +321,13 @@ const chatV1 = async (req, res) => {
         transactions.reduce((acc, curr) => acc + curr.rawAmount, 0),
       );
 
-      // TODO: make promptBuffer a config option; buffer for titles, needs buffer for system instructions
+      // TODO: make promptBuffer a config option; buffer for title generation.
       const promptBuffer = parentMessageId === Constants.NO_PARENT && !_thread_id ? 200 : 0;
       // 5 is added for labels
-      let promptTokens = (await countTokens(text + (promptPrefix ?? ''))) + 5;
-      promptTokens += totalPreviousTokens + promptBuffer;
+      const promptText = [`${text ?? ''}${promptPrefix ?? ''}`, projectInstructions]
+        .filter(Boolean)
+        .join('\n\n');
+      let promptTokens = totalPreviousTokens + (await countTokens(promptText)) + 5 + promptBuffer;
       // Count tokens up to the current context window
       promptTokens = Math.min(promptTokens, getModelMaxTokens(model));
 
@@ -560,6 +562,10 @@ const chatV1 = async (req, res) => {
       /* asynchronous */
       userMessagePromise = saveUserMessage(req, { ...requestMessage, model });
 
+      const conversationProjectId =
+        existingConversation === null
+          ? projectContext?.projectId
+          : existingConversation?.chatProjectId;
       conversation = {
         conversationId,
         endpoint,
@@ -567,6 +573,7 @@ const chatV1 = async (req, res) => {
         instructions: instructions,
         assistant_id,
         // model,
+        ...(conversationProjectId !== undefined ? { chatProjectId: conversationProjectId } : {}),
       };
 
       if (file_ids.length) {

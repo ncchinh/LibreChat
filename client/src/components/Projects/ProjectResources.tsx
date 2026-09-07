@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { v4 } from 'uuid';
 import * as Ariakit from '@ariakit/react';
 import { EToolResources, FileContext, MAX_CHAT_PROJECT_FILES } from 'librechat-data-provider';
@@ -21,6 +21,7 @@ import {
   DropdownPopup,
   EmptyState,
   FileUpload,
+  Input,
   OGDialog,
   OGDialogContent,
   OGDialogHeader,
@@ -29,11 +30,11 @@ import {
   TooltipAnchor,
   useToastContext,
 } from '@librechat/client';
-import type { TChatProjectFile, TFile } from 'librechat-data-provider';
+import type { TChatProjectFile, TFile, TFileUpload } from 'librechat-data-provider';
 import type { LocalizeFunction } from '~/common';
 import {
   useAddProjectFileMutation,
-  useGetFiles,
+  useProjectAvailableFilesInfiniteQuery,
   useProjectFilesQuery,
   useRemoveProjectFileMutation,
   useUploadFileMutation,
@@ -62,7 +63,6 @@ const isEligibleFile = (file: TFile) =>
   file.embedded === true &&
   file.context === FileContext.message_attachment &&
   (!file.expiredAt || new Date(file.expiredAt).getTime() > Date.now());
-
 export default function ProjectResources({ project }: ProjectResourcesProps) {
   const localize = useLocalize();
   const { showToast } = useToastContext();
@@ -71,28 +71,82 @@ export default function ProjectResources({ project }: ProjectResourcesProps) {
   const fileMenuId = useId();
   const [isFileMenuOpen, setIsFileMenuOpen] = useState(false);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
+  const [pickerSearch, setPickerSearch] = useState('');
+  const deferredPickerSearch = useDeferredValue(pickerSearch);
   const [uploading, setUploading] = useState<UploadState[]>([]);
+  const pendingUploadIdsRef = useRef(new Set<string>());
+  const optimisticAttachedIdsRef = useRef(new Set<string>());
+  const [optimisticAttachedIds, setOptimisticAttachedIds] = useState<string[]>([]);
   const { data: projectFiles, isLoading, isError, refetch } = useProjectFilesQuery(project._id);
+  const availableFilesQuery = useProjectAvailableFilesInfiniteQuery(
+    project._id,
+    { search: deferredPickerSearch || undefined, limit: 20 },
+    { enabled: isPickerOpen },
+  );
   const {
-    data: files = [],
+    data: availableFilesData,
     isLoading: isFilesLoading,
+    isFetchingNextPage,
     isError: isFilesError,
+    hasNextPage,
+    fetchNextPage,
     refetch: refetchFiles,
-  } = useGetFiles<TFile[]>({ enabled: isPickerOpen });
+  } = availableFilesQuery;
   const uploadFile = useUploadFileMutation();
   const addFile = useAddProjectFileMutation();
   const removeFile = useRemoveProjectFileMutation();
-  const fileCount = projectFiles?.length ?? project.fileCount ?? 0;
-  const hasFileCapacity = fileCount < MAX_CHAT_PROJECT_FILES;
-
   const attachedIds = useMemo(
     () => new Set((projectFiles ?? []).map((file) => file.file_id)),
     [projectFiles],
   );
-  const eligibleFiles = useMemo(
-    () => files.filter((file) => isEligibleFile(file) && !attachedIds.has(file.file_id)),
-    [attachedIds, files],
+  const availableFiles = useMemo(
+    () => availableFilesData?.pages.flatMap((page) => page.files) ?? [],
+    [availableFilesData?.pages],
   );
+  const fileCount = projectFiles?.length ?? project.fileCount ?? 0;
+  const getEffectiveFileCount = () => {
+    let count = fileCount + pendingUploadIdsRef.current.size;
+    for (const fileId of optimisticAttachedIdsRef.current) {
+      if (!attachedIds.has(fileId)) {
+        count++;
+      }
+    }
+    return count;
+  };
+  const hasFileCapacity = getEffectiveFileCount() < MAX_CHAT_PROJECT_FILES;
+
+  useEffect(() => {
+    const remaining = optimisticAttachedIds.filter((fileId) => !attachedIds.has(fileId));
+    if (remaining.length !== optimisticAttachedIds.length) {
+      const remainingSet = new Set(remaining);
+      optimisticAttachedIdsRef.current = remainingSet;
+      setOptimisticAttachedIds(remaining);
+    }
+  }, [attachedIds, optimisticAttachedIds]);
+
+  useEffect(() => {
+    if (
+      isPickerOpen &&
+      !isFilesLoading &&
+      !isFilesError &&
+      availableFiles.length === 0 &&
+      hasNextPage &&
+      !isFetchingNextPage
+    ) {
+      void fetchNextPage();
+    }
+  }, [
+    availableFiles.length,
+    fetchNextPage,
+    hasNextPage,
+    isFilesError,
+    isFilesLoading,
+    isFetchingNextPage,
+    isPickerOpen,
+  ]);
+  useEffect(() => {
+    setPickerSearch('');
+  }, [project._id]);
 
   const addExistingFile = async (fileId: string) => {
     try {
@@ -107,50 +161,74 @@ export default function ProjectResources({ project }: ProjectResourcesProps) {
     }
   };
 
-  const upload = async (selected: File, existingFileId?: string) => {
-    const localId = v4();
-    setUploading((current) => [
-      ...current,
-      {
-        id: localId,
-        filename: selected.name,
-        file: selected,
-        fileId: existingFileId,
-        status: 'processing',
-      },
-    ]);
+  const runUpload = async (item: UploadState) => {
     try {
-      let fileId = existingFileId;
+      let fileId = item.fileId;
       if (!fileId) {
         const formData = new FormData();
-        formData.append('file', selected);
-        formData.append('file_id', localId);
+        formData.append('file', item.file);
+        formData.append('file_id', item.id);
         formData.append('endpoint', 'agents');
         formData.append('message_file', 'true');
         formData.append('tool_resource', EToolResources.file_search);
-        const uploaded = await uploadFile.mutateAsync(formData);
+        const uploaded = (await uploadFile.mutateAsync(formData)) as TFileUpload;
         if (!uploaded.file_id || !isEligibleFile(uploaded)) {
           throw new Error('Uploaded file is not eligible for project search');
         }
         fileId = uploaded.file_id;
         setUploading((current) =>
-          current.map((item) => (item.id === localId ? { ...item, fileId } : item)),
+          current.map((candidate) =>
+            candidate.id === item.id ? { ...candidate, fileId } : candidate,
+          ),
         );
       }
       await addFile.mutateAsync({ projectId: project._id, file_id: fileId });
-      setUploading((current) => current.filter((item) => item.id !== localId));
+      pendingUploadIdsRef.current.delete(item.id);
+      optimisticAttachedIdsRef.current.add(fileId);
+      setOptimisticAttachedIds(Array.from(optimisticAttachedIdsRef.current));
+      setUploading((current) => current.filter((candidate) => candidate.id !== item.id));
     } catch {
+      pendingUploadIdsRef.current.delete(item.id);
       setUploading((current) =>
-        current.map((item) => (item.id === localId ? { ...item, status: 'failed' } : item)),
+        current.map((candidate) =>
+          candidate.id === item.id ? { ...candidate, status: 'failed' } : candidate,
+        ),
       );
     }
   };
 
+  const processUploads = async (items: UploadState[]) => {
+    for (const item of items) {
+      await runUpload(item);
+    }
+  };
+
   const handleUploadChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const selected = event.target.files?.[0];
+    const selected = Array.from(event.target.files ?? []);
     event.target.value = '';
-    if (selected) {
-      void upload(selected);
+    if (!selected.length) {
+      return;
+    }
+    const availableCapacity = Math.max(0, MAX_CHAT_PROJECT_FILES - getEffectiveFileCount());
+    const accepted = selected.slice(0, availableCapacity).map((file) => ({
+      id: v4(),
+      filename: file.name,
+      file,
+      status: 'processing' as const,
+    }));
+    accepted.forEach((item) => pendingUploadIdsRef.current.add(item.id));
+    if (accepted.length) {
+      setUploading((current) => [...current, ...accepted]);
+      void processUploads(accepted);
+    }
+    if (selected.length > accepted.length) {
+      showToast({
+        message: localize('com_ui_project_file_excess', {
+          count: selected.length - accepted.length,
+        }),
+        severity: NotificationSeverity.WARNING,
+        showIcon: true,
+      });
     }
   };
 
@@ -167,11 +245,28 @@ export default function ProjectResources({ project }: ProjectResourcesProps) {
   };
 
   const retryUpload = (item: UploadState) => {
-    setUploading((current) => current.filter((candidate) => candidate.id !== item.id));
-    void upload(item.file, item.fileId);
+    if (pendingUploadIdsRef.current.has(item.id)) {
+      return;
+    }
+    if (getEffectiveFileCount() >= MAX_CHAT_PROJECT_FILES) {
+      showToast({
+        message: localize('com_ui_project_file_excess', { count: 1 }),
+        severity: NotificationSeverity.WARNING,
+        showIcon: true,
+      });
+      return;
+    }
+    pendingUploadIdsRef.current.add(item.id);
+    setUploading((current) =>
+      current.map((candidate) =>
+        candidate.id === item.id ? { ...candidate, status: 'processing' } : candidate,
+      ),
+    );
+    void runUpload({ ...item, status: 'processing' });
   };
 
   const dismissUpload = (id: string) => {
+    pendingUploadIdsRef.current.delete(id);
     setUploading((current) => current.filter((item) => item.id !== id));
   };
 
@@ -367,12 +462,23 @@ export default function ProjectResources({ project }: ProjectResourcesProps) {
           <OGDialogHeader>
             <OGDialogTitle>{localize('com_ui_project_choose_file')}</OGDialogTitle>
           </OGDialogHeader>
+          <label className="sr-only" htmlFor="project-file-search">
+            {localize('com_ui_search_files')}
+          </label>
+          <Input
+            id="project-file-search"
+            value={pickerSearch}
+            onChange={(event) => setPickerSearch(event.target.value)}
+            placeholder={localize('com_ui_search_files')}
+            aria-label={localize('com_ui_search_files')}
+          />
           <div
             className="mt-3 max-h-80 space-y-2 overflow-y-auto"
-            role={!isFilesLoading && !isFilesError && eligibleFiles.length ? 'list' : 'status'}
+            role="region"
+            aria-live="polite"
             aria-label={localize('com_ui_project_choose_file')}
           >
-            {isFilesLoading && (
+            {(isFilesLoading || isFetchingNextPage) && (
               <div role="status" className="flex justify-center py-6">
                 <Spinner className="size-4 text-text-secondary" />
                 <span className="sr-only">{localize('com_ui_loading')}</span>
@@ -386,31 +492,51 @@ export default function ProjectResources({ project }: ProjectResourcesProps) {
                 </Button>
               </Alert>
             )}
-            {!isFilesLoading && !isFilesError && !eligibleFiles.length && (
-              <p className="py-6 text-center text-sm text-text-secondary">
-                {localize('com_ui_project_no_eligible_files')}
-              </p>
-            )}
             {!isFilesLoading &&
               !isFilesError &&
-              eligibleFiles.map((file) => (
-                <div key={file.file_id} role="listitem">
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-3 rounded-xl border border-border-light bg-surface-secondary px-3.5 py-3 text-left transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-text-primary"
-                    onClick={() => void addExistingFile(file.file_id)}
-                    disabled={addFile.isLoading}
-                  >
-                    <Paperclip className="size-4 shrink-0 text-text-secondary" aria-hidden="true" />
-                    <span className="min-w-0 flex-1 truncate text-sm text-text-primary">
-                      {file.filename}
-                    </span>
-                    <span className="shrink-0 text-xs text-text-secondary">
-                      {formatFileSize(file.bytes)}
-                    </span>
-                  </button>
-                </div>
-              ))}
+              !isFetchingNextPage &&
+              !availableFiles.length &&
+              !hasNextPage && (
+                <p className="py-6 text-center text-sm text-text-secondary">
+                  {localize('com_ui_project_no_eligible_files')}
+                </p>
+              )}
+            {!isFilesLoading && !isFilesError && availableFiles.length > 0 && (
+              <ul className="space-y-2">
+                {availableFiles.map((file) => (
+                  <li key={file.file_id}>
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-3 rounded-xl border border-border-light bg-surface-secondary px-3.5 py-3 text-left transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-text-primary"
+                      onClick={() => void addExistingFile(file.file_id)}
+                      disabled={addFile.isLoading || !hasFileCapacity}
+                    >
+                      <Paperclip
+                        className="size-4 shrink-0 text-text-secondary"
+                        aria-hidden="true"
+                      />
+                      <span className="min-w-0 flex-1 truncate text-sm text-text-primary">
+                        {file.filename}
+                      </span>
+                      <span className="shrink-0 text-xs text-text-secondary">
+                        {formatFileSize(file.bytes)}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {!isFilesLoading && !isFilesError && hasNextPage && (
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={() => void fetchNextPage()}
+                disabled={isFetchingNextPage}
+              >
+                {isFetchingNextPage ? localize('com_ui_loading') : localize('com_ui_load_more')}
+              </Button>
+            )}
           </div>
         </OGDialogContent>
       </OGDialog>

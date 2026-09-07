@@ -985,6 +985,13 @@ export function getProjectFiles(projectId: string): Promise<t.TChatProjectFile[]
   return request.get(endpoints.projectFiles(projectId));
 }
 
+export function getAvailableProjectFiles(
+  projectId: string,
+  params: q.ProjectAvailableFilesParams = {},
+): Promise<q.ProjectAvailableFilesResponse> {
+  return request.get(endpoints.projectAvailableFiles(projectId, params));
+}
+
 export function addProjectFile(payload: {
   projectId: string;
   file_id: string;

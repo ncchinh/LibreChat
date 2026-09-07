@@ -76,6 +76,8 @@ async function saveUserMessage(req, params) {
     tokenCount,
   };
 
+  // The resolver is authoritative; saveConvo applies this membership only on insert.
+  const chatProjectId = req?.chatProjectContext?.projectId;
   const convo = {
     endpoint: params.endpoint,
     conversationId: params.conversationId,
@@ -83,8 +85,8 @@ async function saveUserMessage(req, params) {
     instructions: params.instructions,
     assistant_id: params.assistant_id,
     model: params.model,
+    ...(typeof chatProjectId === 'string' && chatProjectId ? { chatProjectId } : {}),
   };
-
   if (params.files?.length) {
     userMessage.files = params.files.map(({ file_id }) => ({ file_id }));
     convo.file_ids = params.file_ids;

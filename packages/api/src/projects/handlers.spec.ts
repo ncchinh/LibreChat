@@ -1,7 +1,5 @@
 import { MAX_CHAT_PROJECT_INSTRUCTIONS_LENGTH } from 'librechat-data-provider';
-import type { ChatProjectMethods } from '@librechat/data-schemas';
 import type { Response } from 'express';
-import type { GetProjectFiles } from './resources';
 import { createProjectHandlers } from './handlers';
 
 const projectId = '507f1f77bcf86cd799439011';
@@ -31,7 +29,7 @@ function response() {
   return { res, result };
 }
 
-function setup(overrides: Record<string, unknown> = {}) {
+function setup(overrides: Partial<Parameters<typeof createProjectHandlers>[0]> = {}) {
   const deps = {
     listChatProjects: jest.fn(),
     createChatProject: jest.fn().mockResolvedValue({ _id: projectId }),
@@ -39,11 +37,12 @@ function setup(overrides: Record<string, unknown> = {}) {
     updateChatProject: jest.fn().mockResolvedValue({ _id: projectId }),
     deleteChatProject: jest.fn().mockResolvedValue({ deletedCount: 1, modifiedCount: 1 }),
     assignConversationToProject: jest.fn(),
-    addChatProjectFile: jest.fn().mockResolvedValue({ _id: projectId }),
-    removeChatProjectFile: jest.fn().mockResolvedValue({ _id: projectId }),
+    addChatProjectFile: jest.fn(),
+    removeChatProjectFile: jest.fn(),
     getFiles: jest.fn().mockResolvedValue([]),
+    getAvailableProjectFiles: jest.fn().mockResolvedValue({ files: [], nextCursor: null }),
     ...overrides,
-  } as unknown as ChatProjectMethods & { getFiles: GetProjectFiles };
+  };
   return { handlers: createProjectHandlers(deps), deps };
 }
 
@@ -91,5 +90,81 @@ describe('ChatProject handlers', () => {
     await handlers.listProjectFiles(request({ params: { projectId } }), res);
     expect(result.statusCode).toBe(200);
     expect(result.body).toEqual([{ file_id: 'gone', availability: 'unavailable' }]);
+  });
+
+  it('excludes extracted text from available-file metadata', async () => {
+    const file = {
+      file_id: 'candidate',
+      filename: 'candidate.txt',
+      filepath: '/uploads/candidate.txt',
+      object: 'file',
+      type: 'text/plain',
+      bytes: 10,
+      usage: 0,
+      embedded: true,
+      context: 'message_attachment',
+      user: 'owner',
+      tenantId: 'tenant-a',
+      text: 'must not be returned',
+    };
+    const { handlers } = setup({
+      getChatProject: jest.fn().mockResolvedValue({
+        _id: projectId,
+        tenantId: 'tenant-a',
+        file_ids: ['attached'],
+      }),
+      getAvailableProjectFiles: jest.fn().mockResolvedValue({
+        files: [file],
+        nextCursor: 'next',
+      }),
+    });
+    const { res, result } = response();
+
+    await handlers.listAvailableProjectFiles(
+      request({
+        params: { projectId },
+        query: { limit: '2', cursor: projectId, search: 'candidate' },
+      }),
+      res,
+    );
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({ files: [{ file_id: 'candidate' }] });
+    expect(result.body).not.toHaveProperty('files.0.text');
+  });
+
+  it.each([{ limit: '0' }, { limit: '51' }, { limit: '1.5' }, { limit: 'nope' }])(
+    'rejects invalid available-file limit %# before project access',
+    async (query) => {
+      const { handlers, deps } = setup();
+      const { res, result } = response();
+      await handlers.listAvailableProjectFiles(request({ params: { projectId }, query }), res);
+      expect(result.statusCode).toBe(400);
+      expect(deps.getChatProject).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects malformed available-file cursors before project access', async () => {
+    const { handlers, deps } = setup();
+    const { res, result } = response();
+    await handlers.listAvailableProjectFiles(
+      request({ params: { projectId }, query: { cursor: 'malformed' } }),
+      res,
+    );
+    expect(result.statusCode).toBe(400);
+    expect(deps.getChatProject).not.toHaveBeenCalled();
+  });
+  it('denies available-file metadata for a foreign tenant', async () => {
+    const { handlers, deps } = setup({
+      getChatProject: jest.fn().mockResolvedValue({
+        _id: projectId,
+        tenantId: 'tenant-b',
+        file_ids: [],
+      }),
+    });
+    const { res, result } = response();
+    await handlers.listAvailableProjectFiles(request({ params: { projectId } }), res);
+    expect(result.statusCode).toBe(404);
+    expect(deps.getAvailableProjectFiles).not.toHaveBeenCalled();
   });
 });

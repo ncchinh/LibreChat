@@ -335,7 +335,7 @@ export default function ProjectWorkspace() {
               )}
             </div>
           </section>
-          {isRagEnabled && <ProjectResources project={project} />}
+          {isRagEnabled && <ProjectResources key={project._id} project={project} />}
         </div>
 
         <section

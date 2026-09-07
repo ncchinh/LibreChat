@@ -412,6 +412,81 @@ describe('initializeAgent: ChatProject context', () => {
     expect(agent.tools).toEqual(originalTools);
     expect(agent).not.toHaveProperty('tool_resources');
   });
+  it('adds Project files for file_search supplied by a manual Skill', async () => {
+    const { agent, req, loadTools, db } = createMocks();
+    const { Types } = await import('mongoose');
+    const skillId = new Types.ObjectId();
+    agent.tools = [];
+    loadTools.mockImplementation(async ({ tools }: { tools: string[] }) => ({
+      tools: [],
+      toolContextMap: {},
+      toolDefinitions: tools.map((name) => ({ name, description: '', parameters: {} })),
+      hasDeferredTools: false,
+    }));
+    const getSkillByName: InitializeAgentDbMethods['getSkillByName'] = jest.fn().mockResolvedValue({
+      _id: skillId,
+      name: 'project-file-search',
+      body: 'Search project files.',
+      author: { toString: () => req.user!.id } as unknown as import('mongoose').Types.ObjectId,
+      allowedTools: [Tools.file_search],
+    });
+
+    const result = await initializeAgent(
+      {
+        runtime: projectRuntime(),
+        agent,
+        loadTools,
+        endpointOption: { endpoint: EModelEndpoint.agents },
+        allowedProviders: new Set([Providers.OPENAI]),
+        useChatProjectContext: true,
+        accessibleSkillIds: [skillId],
+        manualSkills: ['project-file-search'],
+      },
+      {
+        ...db,
+        listSkillsByAccess: async () => ({ skills: [], has_more: false, after: null }),
+        getSkillByName,
+      },
+    );
+
+    expect(loadTools).toHaveBeenCalledWith(expect.objectContaining({ tools: [Tools.file_search] }));
+    expect(result.tool_resources?.[EToolResources.file_search]?.files).toEqual([projectFile]);
+  });
+
+  it('does not hydrate or inject Project files when file_search is role-disabled', async () => {
+    const { agent, loadTools, db } = createMocks();
+    const { Types } = await import('mongoose');
+    const skillId = new Types.ObjectId();
+    const getSkillByName: InitializeAgentDbMethods['getSkillByName'] = jest.fn().mockResolvedValue({
+      _id: skillId,
+      name: 'denied-project-file-search',
+      body: 'Search project files.',
+      author: { toString: () => 'user-1' } as unknown as import('mongoose').Types.ObjectId,
+      allowedTools: [Tools.file_search],
+    });
+
+    const result = await initializeAgent(
+      {
+        runtime: { ...projectRuntime(), chatProjectFiles: undefined },
+        agent,
+        loadTools,
+        endpointOption: { endpoint: EModelEndpoint.agents },
+        allowedProviders: new Set([Providers.OPENAI]),
+        useChatProjectContext: true,
+        accessibleSkillIds: [skillId],
+        manualSkills: ['denied-project-file-search'],
+        fileSearchAvailable: false,
+      },
+      {
+        ...db,
+        listSkillsByAccess: async () => ({ skills: [], has_more: false, after: null }),
+        getSkillByName,
+      },
+    );
+
+    expect(db.getFiles).not.toHaveBeenCalled();
+    expect(result.tool_resources).toBeUndefined();
+  });
 
   it('shares canonical hydration across concurrent graph agents', async () => {
     const { agent, loadTools, db } = createMocks();
@@ -2324,6 +2399,80 @@ describe('initializeAgent — skill `allowed-tools` union (Phase 6)', () => {
     const definedNames = result.toolDefinitions?.map((d) => d.name) ?? [];
     expect(definedNames).toContain('web_search');
     expect(definedNames).not.toContain('mcp__broken__tool');
+  });
+  it('removes skill-added Project resources before retrying without denied tools', async () => {
+    const { agent, req, loadTools, db } = createMocks();
+    const { Types } = await import('mongoose');
+    const skillId = new Types.ObjectId();
+    const projectFile = {
+      file_id: 'project-file',
+      filename: 'project.txt',
+      type: 'text/plain',
+      embedded: true,
+    } as TFile;
+    agent.tools = [];
+
+    let call = 0;
+    loadTools.mockImplementation(async ({ tools }: { tools: string[] }) => {
+      call += 1;
+      if (call === 1) {
+        return undefined;
+      }
+      return {
+        tools: [],
+        toolContextMap: {},
+        toolDefinitions: tools.map((name) => ({ name, description: '', parameters: {} })),
+        hasDeferredTools: false,
+      };
+    });
+
+    const getSkillByName = buildGetSkillByName(
+      'project-file-search-fallback',
+      [Tools.file_search],
+      skillId,
+      req.user!.id,
+    );
+
+    const result = await initializeAgent(
+      {
+        runtime: {
+          user: req.user,
+          appConfig: {
+            endpoints: {
+              [EModelEndpoint.agents]: {
+                capabilities: [AgentCapabilities.file_search],
+              },
+            },
+          } as NonNullable<ServerRequest['config']>,
+          requestBody: {},
+          turnStartedAt: 1,
+          chatProjectContext: {
+            projectId: 'project-1',
+            contextRevision: 1,
+            instructions: '',
+            file_ids: [projectFile.file_id],
+          },
+          chatProjectFiles: [projectFile],
+        },
+        req,
+        agent,
+        loadTools,
+        endpointOption: { endpoint: EModelEndpoint.agents },
+        allowedProviders: new Set([Providers.OPENAI]),
+        useChatProjectContext: true,
+        accessibleSkillIds: [skillId],
+        manualSkills: ['project-file-search-fallback'],
+      },
+      { ...db, listSkillsByAccess: emptyListSkillsByAccess, getSkillByName },
+    );
+
+    expect(loadTools).toHaveBeenCalledTimes(2);
+    expect(loadTools.mock.calls[0][0].tool_resources).toEqual({
+      [EToolResources.file_search]: { files: [projectFile] },
+    });
+    expect(loadTools.mock.calls[1][0].tools).toEqual([]);
+    expect(loadTools.mock.calls[1][0].tool_resources).toBeUndefined();
+    expect(result.tool_resources).toBeUndefined();
   });
 
   it('retries loadTools without extras when the union call throws (agent tools must still load)', async () => {

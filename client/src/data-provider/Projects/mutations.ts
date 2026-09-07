@@ -145,6 +145,7 @@ export const useAddProjectFileMutation = (): UseMutationResult<
       onSuccess: (project, variables) => {
         queryClient.setQueryData([QueryKeys.project, variables.projectId], project);
         queryClient.invalidateQueries([QueryKeys.projectFiles, variables.projectId]);
+        queryClient.invalidateQueries([QueryKeys.projectAvailableFiles, variables.projectId]);
         queryClient.invalidateQueries([QueryKeys.projects]);
       },
     },
@@ -165,6 +166,7 @@ export const useRemoveProjectFileMutation = (): UseMutationResult<
       onSuccess: (project, variables) => {
         queryClient.setQueryData([QueryKeys.project, variables.projectId], project);
         queryClient.invalidateQueries([QueryKeys.projectFiles, variables.projectId]);
+        queryClient.invalidateQueries([QueryKeys.projectAvailableFiles, variables.projectId]);
         queryClient.invalidateQueries([QueryKeys.projects]);
       },
     },
