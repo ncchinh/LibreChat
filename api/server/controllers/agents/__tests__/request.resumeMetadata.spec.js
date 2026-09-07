@@ -3602,53 +3602,69 @@ describe('ResumableAgentController resume metadata', () => {
       expect(mockSaveConvo).not.toHaveBeenCalled();
     });
 
-    it('creates the conversation row for a failed first turn', async () => {
-      const res = createResumableResponse();
-      mockGenerationJobManager.claimGeneration.mockImplementation(
-        async (_userId, _clientRequestId, streamId, claimedConversationId) =>
-          wonGenerationClaim({ streamId, conversationId: claimedConversationId }),
-      );
-      const req = createFailedRequest({
-        conversationId: undefined,
-        clientRequestId: 'failed-new-conversation',
-        agent_id: 'unverified-agent',
-        parentMessageId: '00000000-0000-0000-0000-000000000000',
-        endpointOption: {
-          endpoint: 'azureOpenAI',
+    it.each([false, true])(
+      'creates the conversation row for a failed first turn (authorized project: %s)',
+      async (hasAuthorizedProject) => {
+        const res = createResumableResponse();
+        mockGenerationJobManager.claimGeneration.mockImplementation(
+          async (_userId, _clientRequestId, streamId, claimedConversationId) =>
+            wonGenerationClaim({ streamId, conversationId: claimedConversationId }),
+        );
+        const req = createFailedRequest({
+          conversationId: undefined,
+          clientRequestId: 'failed-new-conversation',
           agent_id: 'unverified-agent',
-          modelOptions: { model: 'gpt-4o' },
-          chatProjectId: '507f1f77bcf86cd799439011',
-        },
-      });
+          parentMessageId: '00000000-0000-0000-0000-000000000000',
+          endpointOption: {
+            endpoint: 'azureOpenAI',
+            agent_id: 'unverified-agent',
+            modelOptions: { model: 'gpt-4o' },
+            chatProjectId: '507f1f77bcf86cd799439011',
+          },
+        });
+        if (hasAuthorizedProject) {
+          req.chatProjectContext = {
+            projectId: '507f1f77bcf86cd799439012',
+            contextRevision: 0,
+            instructions: '',
+            file_ids: [],
+          };
+        }
 
-      await AgentController(
-        req,
-        res,
-        jest.fn(),
-        jest.fn().mockRejectedValue(new Error('model unavailable')),
-        null,
-      );
+        await AgentController(
+          req,
+          res,
+          jest.fn(),
+          jest.fn().mockRejectedValue(new Error('model unavailable')),
+          null,
+        );
 
-      const mintedConversationId = res.json.mock.calls[0][0].conversationId;
-      expect(mockSaveMessage).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({
-          messageId: 'user-message_',
-          conversationId: mintedConversationId,
-        }),
-        expect.any(Object),
-      );
-      expect(mockSaveConvo).toHaveBeenCalledWith(
-        expect.objectContaining({ userId: 'user-123' }),
-        expect.objectContaining({
-          conversationId: mintedConversationId,
-          endpoint: 'azureOpenAI',
-          model: 'gpt-4o',
-          chatProjectId: '507f1f77bcf86cd799439011',
-        }),
-        expect.objectContaining({ initialAgentId: null }),
-      );
-    });
+        const mintedConversationId = res.json.mock.calls[0][0].conversationId;
+        expect(mockSaveMessage).toHaveBeenCalledWith(
+          expect.any(Object),
+          expect.objectContaining({
+            messageId: 'user-message_',
+            conversationId: mintedConversationId,
+          }),
+          expect.any(Object),
+        );
+        expect(mockSaveConvo).toHaveBeenCalledWith(
+          expect.objectContaining({ userId: 'user-123' }),
+          expect.objectContaining({
+            conversationId: mintedConversationId,
+            endpoint: 'azureOpenAI',
+            model: 'gpt-4o',
+          }),
+          expect.objectContaining({ initialAgentId: null }),
+        );
+        const savedConversation = mockSaveConvo.mock.calls[0][1];
+        if (hasAuthorizedProject) {
+          expect(savedConversation.chatProjectId).toBe('507f1f77bcf86cd799439012');
+        } else {
+          expect(savedConversation).not.toHaveProperty('chatProjectId');
+        }
+      },
+    );
   });
 
   it('finalizes the failed job before releasing the idempotency claim', async () => {
