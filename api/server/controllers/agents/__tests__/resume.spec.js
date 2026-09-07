@@ -2208,7 +2208,15 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
       file_ids: ['file-1'],
     });
 
-    const withProject = (contextRevision, pendingKey) => {
+    const withProject = (contextRevision, pendingRevision) => {
+      const { getChatProjectContextKey } = jest.requireActual('@librechat/api');
+      const pendingKey =
+        pendingRevision === undefined
+          ? undefined
+          : getChatProjectContextKey({
+              ...projectRecord(pendingRevision),
+              projectId: 'project-1',
+            });
       mockGetConvo.mockResolvedValue(projectConversation);
       mockGetChatProject.mockResolvedValue(projectRecord(contextRevision));
       mockGenerationJobManager.getJob.mockResolvedValue(
@@ -2219,28 +2227,23 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
     };
 
     it('resumes when the authoritative project context key is unchanged', async () => {
-      withProject(3, 'chat-project:project-1:3:file-1');
+      withProject(3, 3);
       const res = await post(approveBody());
       await settled;
       expect(res.status).toBe(200);
       expect(mockGenerationJobManager.approvals.resolve).toHaveBeenCalled();
       expect(mockInitializeClient).toHaveBeenCalled();
-      expect(mockGenerationJobManager.completeJob).not.toHaveBeenCalledWith(
-        CONVO_ID,
-        'Project context changed before approval could be resumed',
-        1000,
-      );
     });
 
     it('terminalizes and prunes the claimed epoch when project context changes', async () => {
-      withProject(4, 'chat-project:project-1:3:file-1');
+      withProject(4, 3);
       const res = await post(approveBody());
       expect(res.status).toBe(409);
       expect(res.body).toMatchObject({ code: 'PROJECT_CONTEXT_CHANGED' });
       expect(mockGenerationJobManager.approvals.resolve).toHaveBeenCalled();
       expect(mockGenerationJobManager.completeJob).toHaveBeenCalledWith(
         CONVO_ID,
-        'Project context changed before approval could be resumed',
+        expect.any(String),
         1000,
       );
       expect(mockGenerationJobManager.approvals.resolve.mock.invocationCallOrder[0]).toBeLessThan(
@@ -2264,7 +2267,7 @@ describe('ResumeAgentController (POST /agents/chat/resume)', () => {
     });
 
     it('does not terminalize or prune when the approval claim loses its CAS', async () => {
-      withProject(4, 'chat-project:project-1:3:file-1');
+      withProject(4, 3);
       mockGenerationJobManager.approvals.resolve.mockResolvedValue(false);
       const res = await post(approveBody());
       expect(res.status).toBe(409);

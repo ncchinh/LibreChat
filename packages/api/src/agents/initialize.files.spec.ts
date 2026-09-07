@@ -1,7 +1,7 @@
 import { Tools, EToolResources } from 'librechat-data-provider';
 import type { IConversation } from '@librechat/data-schemas';
 import { readResolvedConversationFiles, resolveResendToolResources } from './initialize';
-import { PARTIAL_RESOLVED_CONVERSATION } from './guard';
+import { PARTIAL_RESOLVED_CONVERSATION } from './conversationSymbols';
 
 describe('readResolvedConversationFiles', () => {
   const conversationId = 'conversation-1';

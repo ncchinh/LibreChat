@@ -39,8 +39,8 @@ import {
   useUploadFileMutation,
 } from '~/data-provider';
 import { NotificationSeverity } from '~/common';
+import { formatFileSize } from '~/utils';
 import { useLocalize } from '~/hooks';
-import { formatBytes } from '~/utils';
 type ProjectResourcesProps = {
   project: { _id: string; fileCount?: number };
 };
@@ -406,7 +406,7 @@ export default function ProjectResources({ project }: ProjectResourcesProps) {
                       {file.filename}
                     </span>
                     <span className="shrink-0 text-xs text-text-secondary">
-                      {formatBytes(file.bytes)}
+                      {formatFileSize(file.bytes)}
                     </span>
                   </button>
                 </div>

@@ -1,6 +1,6 @@
 import type { IChatProject, IConversation } from '@librechat/data-schemas';
 
-import { PARTIAL_RESOLVED_CONVERSATION } from '../agents/guard';
+import { PARTIAL_RESOLVED_CONVERSATION } from '../agents/conversationSymbols';
 
 export interface ResolvedChatProjectContext {
   projectId: string;
@@ -124,7 +124,7 @@ export function getChatProjectContextKey(
   if (context == null) {
     return 'chat-project:none';
   }
-  return `chat-project:${context.projectId}:${context.contextRevision}:${context.file_ids.join(',')}`;
+  return `chat-project:${context.projectId}:${context.contextRevision}:${JSON.stringify(context.file_ids)}`;
 }
 
 export function formatChatProjectInstructions(

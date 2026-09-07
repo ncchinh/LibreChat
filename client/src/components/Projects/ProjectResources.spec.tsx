@@ -195,7 +195,7 @@ describe('ProjectResources', () => {
       ],
     };
     mockFileQueryState.data = [
-      { ...uploadedFile, file_id: 'ready-id', filename: 'ready.txt' },
+      { ...uploadedFile, file_id: 'ready-id', filename: 'ready.txt', bytes: 12800 },
       { ...uploadedFile, file_id: 'expired-id', filename: 'expired.txt', expiredAt: '2020-01-01' },
       { ...uploadedFile, file_id: 'agent-id', filename: 'agent.txt', context: 'agents' },
       { ...uploadedFile, file_id: 'attached-id', filename: 'attached.txt' },
@@ -205,7 +205,7 @@ describe('ProjectResources', () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Add files' }));
     await user.click(screen.getByRole('menuitem', { name: 'Choose an existing file' }));
-    expect(await screen.findByRole('button', { name: /ready.txt/ })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /ready.txt/ })).toHaveTextContent('12.5 KB');
     expect(screen.queryByRole('button', { name: /expired.txt|agent.txt/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^attached.txt/ })).not.toBeInTheDocument();
   });

@@ -1,5 +1,5 @@
 import { getChatProjectContextKey, resolveChatProjectContext } from './context';
-import { PARTIAL_RESOLVED_CONVERSATION } from '../agents/guard';
+import { PARTIAL_RESOLVED_CONVERSATION } from '../agents/conversationSymbols';
 
 const project = {
   _id: 'project-a',
@@ -117,6 +117,23 @@ describe('resolveChatProjectContext', () => {
     });
 
     expect(first).not.toContain('secret');
+    expect(first).not.toBe(second);
+  });
+
+  it('keeps distinct file ID sequences distinct in the resume key', () => {
+    const first = getChatProjectContextKey({
+      projectId: 'project-a',
+      contextRevision: 1,
+      instructions: '',
+      file_ids: ['a', 'b,c'],
+    });
+    const second = getChatProjectContextKey({
+      projectId: 'project-a',
+      contextRevision: 1,
+      instructions: '',
+      file_ids: ['a,b', 'c'],
+    });
+
     expect(first).not.toBe(second);
   });
 });
